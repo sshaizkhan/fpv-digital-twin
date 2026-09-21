@@ -1,0 +1,57 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "RelWithDebInfo (Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FDT_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "default",
+      "displayName": "Debug (Ninja)",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "inherits": "default",
+      "displayName": "Release (Ninja)",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "FDT_WERROR": "ON" }
+    },
+    {
+      "name": "make",
+      "displayName": "RelWithDebInfo (Unix Makefiles, no ninja needed)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/make",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FDT_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default" },
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "make", "configurePreset": "make" }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    { "name": "debug", "inherits": "default", "configurePreset": "debug" },
+    { "name": "release", "inherits": "default", "configurePreset": "release" },
+    { "name": "make", "inherits": "default", "configurePreset": "make" }
+  ]
+}

@@ -1,0 +1,35 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+_deps/
+install/
+
+# macOS
+.DS_Store
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Godot
+viewer/.godot/
+viewer/.import/
+viewer/export_presets.cfg
+
+# Logs / captured data / generated plots
+logs/*.bbl
+logs/*.bfl
+logs/*.csv
+out/
+*.log
+
+# Editor
+.vscode/
+.idea/
+*.swp

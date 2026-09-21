@@ -1,0 +1,7 @@
+# Phase 4 tooling: Blackbox parsing, stick replay, overlay plots, parameter fitting.
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+orangebox>=0.5.0   # Betaflight Blackbox log parser
+pyyaml>=6.0        # reading/writing config/quad.yaml
+pytest>=8.0

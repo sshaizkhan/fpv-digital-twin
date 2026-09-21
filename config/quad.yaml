@@ -1,0 +1,381 @@
+# ---------------------------------------------------------------------------
+# Physical parameters for THE real quad. Single source of truth.
+#
+# Frames, signs and units: see docs/coordinate_frames.md
+#   world NED (x North, y East, z Down), body FRD (x fwd, y right, z down),
+#   origin at CG, SI units everywhere except angles marked `units: deg`.
+#
+# EVERY numeric parameter is a block of the form:
+#     value:     scalar, or [x, y, z]
+#     units:     SI unit string (or "deg" for human-measured angles)
+#     measured:  true  = taken from the real quad / real data
+#                false = estimate or placeholder, REPLACE ME
+#     source:    where the number came from
+#
+# `measured: false` is not decoration. `fdt_config_dump` prints every one of them,
+# and the loader refuses to parse a parameter block that omits the field.
+# What to measure and how: docs/parameters_to_measure.md
+# ---------------------------------------------------------------------------
+
+schema_version: 1
+
+meta:
+  name: "custom 3D-printed 5in X"
+  description: >-
+    Custom 3D-printed 5 inch X frame, SpeedyBee F405 V4 + 55A BLHeli_S (Bluejay),
+    EMAX ECO II 2807 1700KV, Gemfan Hurricane 51466 tri-blade, 4S 1300 mAh.
+  updated: "2026-09-21"
+  frame_convention: "FRD_NED"   # must match docs/coordinate_frames.md
+
+firmware:
+  # Pins third_party/betaflight. Phase 2 cannot start until this is real:
+  # read it off the Configurator welcome screen or `version` in the CLI.
+  betaflight_version: null        # e.g. "4.5.1"
+  betaflight_git_tag: null        # e.g. "4.5.1"
+  target: "SPEEDYBEEF405V4"
+  diff_all: "config/diff_all.txt" # `diff all` from the real FC, saved verbatim
+  dump_all: "config/dump_all.txt" # `dump all` from the real FC, saved verbatim
+
+# ---------------------------------------------------------------------------
+mass:
+  auw:
+    value: 0.720
+    units: kg
+    measured: false
+    source: "estimate: 3D-printed 5in frame ~180 g + stack ~40 g + 4x(motor 47 g
+      + prop 5 g) ~208 g + 4S 1300 ~165 g + cam/VTX/misc. KITCHEN SCALE THIS."
+
+  cg_offset:
+    # Offset of the CG from the geometric centre of the motor square, body frame.
+    # The body frame origin IS the CG; this records where that sits on the frame.
+    value: [0.0, 0.0, 0.0]
+    units: m
+    measured: false
+    source: "assumed at the geometric centre of the motor square, in the motor plane"
+
+  inertia_diag:
+    # [Ixx, Iyy, Izz] about the CG, body axes.
+    value: [0.00175, 0.00175, 0.00336]
+    units: kg*m^2
+    measured: false
+    source: "point-mass estimate: 4x 52 g at (+-0.078, +-0.078, 0) m plus a 0.50 kg
+      0.10x0.10x0.04 m central box. Replace with the CAD inertia tensor."
+
+  inertia_products:
+    # [Ixy, Ixz, Iyz]. Zero for a symmetric X frame; keep the hook for CAD output.
+    value: [0.0, 0.0, 0.0]
+    units: kg*m^2
+    measured: false
+    source: "assumed zero by X-frame symmetry"
+
+# ---------------------------------------------------------------------------
+motors:
+  # Physical layout. Positions are from the CG, body FRD frame, in metres.
+  # Front is +x, right is +y. Nominal 220 mm diagonal -> 0.078 m per axis.
+  geometry:
+    FL:
+      value: [0.078, -0.078, 0.0]
+      units: m
+      measured: false
+      source: "assumed 220 mm diagonal 5in X, motors in the CG plane"
+    FR:
+      value: [0.078, 0.078, 0.0]
+      units: m
+      measured: false
+      source: "assumed 220 mm diagonal 5in X, motors in the CG plane"
+    RL:
+      value: [-0.078, -0.078, 0.0]
+      units: m
+      measured: false
+      source: "assumed 220 mm diagonal 5in X, motors in the CG plane"
+    RR:
+      value: [-0.078, 0.078, 0.0]
+      units: m
+      measured: false
+      source: "assumed 220 mm diagonal 5in X, motors in the CG plane"
+
+  # Prop rotation as seen from ABOVE the quad. See docs/coordinate_frames.md §5.
+  # "props in" = the leading edges of the front props sweep toward the centre.
+  spin:
+    verified: false               # confirm against the real quad and yaw_motors_reversed
+    source: "Betaflight stock 'props in' assumed; NOT yet checked against the quad"
+    FL: CW
+    FR: CCW
+    RL: CCW
+    RR: CW
+
+  # Betaflight motor index (1..4 as Configurator shows them) -> physical position.
+  # DO NOT TRUST THIS. Phase 2 must derive it from the Betaflight source and
+  # confirm it in the Configurator motor tab. See docs/sitl_interface.md.
+  betaflight_order:
+    verified: false
+    source: "asserted from the conventional Betaflight quad-X layout; UNVERIFIED"
+    1: RR
+    2: FR
+    3: RL
+    4: FL
+
+  model:
+    kv:
+      value: 1700.0
+      units: rpm/V
+      measured: true
+      source: "EMAX ECO II 2807 1700KV, from the motor spec"
+
+    thrust_coeff:
+      # thrust [N] = kT * omega^2, omega in rad/s
+      value: 2.93e-6
+      units: N/(rad/s)^2
+      measured: false
+      source: "PLACEHOLDER: back-solved from ~1.5 kgf per motor at ~21400 rpm on 4S
+        with 51466 tri-blade. Replace with thrust-stand data or the Phase 4 fitter."
+
+    torque_coeff:
+      # rotor drag torque [N*m] = kQ * omega^2
+      value: 1.60e-8
+      units: N*m/(rad/s)^2
+      measured: false
+      source: "PLACEHOLDER: kQ/kT ~ 0.0055 m, typical for a 5in tri-blade.
+        Dominates yaw authority - fit this in Phase 4."
+
+    time_constant:
+      # first-order lag from motor command to rotor speed
+      value: 0.025
+      units: s
+      measured: false
+      source: "PLACEHOLDER: typical 2807 + Bluejay 48 kHz on 4S. Fit in Phase 4."
+
+    rotor_inertia:
+      # bell + prop, about the spin axis; drives the yaw reaction torque
+      value: 6.0e-6
+      units: kg*m^2
+      measured: false
+      source: "PLACEHOLDER: estimated from bell and prop mass distribution"
+
+    resistance:
+      value: 0.065
+      units: ohm
+      measured: false
+      source: "PLACEHOLDER: phase-to-phase / 2 for a 2807; measure with a milliohm
+        meter or leave for the fitter"
+
+    max_rpm_safety:
+      # hard clamp so a bad gain cannot produce nonsense; not a physical parameter
+      value: 40000.0
+      units: rpm
+      measured: false
+      source: "safety clamp, not physical"
+
+# ---------------------------------------------------------------------------
+battery:
+  cells:
+    value: 4
+    units: count
+    measured: true
+    source: "4S pack"
+
+  capacity:
+    value: 1.300
+    units: A*h
+    measured: true
+    source: "1300 mAh pack"
+
+  internal_resistance:
+    value: 0.030
+    units: ohm
+    measured: false
+    source: "PLACEHOLDER: whole-pack DC IR estimate for a healthy 4S 1300.
+      Fit from the sag seen in a Blackbox log in Phase 4."
+
+  # Open-circuit voltage vs state of charge, PER CELL. Monotonic, soc ascending.
+  ocv_curve:
+    units: "V per cell vs state-of-charge fraction"
+    measured: false
+    source: "PLACEHOLDER: generic LiPo OCV curve"
+    points:
+      - {soc: 0.00, v: 3.30}
+      - {soc: 0.05, v: 3.50}
+      - {soc: 0.10, v: 3.63}
+      - {soc: 0.20, v: 3.70}
+      - {soc: 0.30, v: 3.75}
+      - {soc: 0.40, v: 3.79}
+      - {soc: 0.50, v: 3.83}
+      - {soc: 0.60, v: 3.87}
+      - {soc: 0.70, v: 3.92}
+      - {soc: 0.80, v: 3.98}
+      - {soc: 0.90, v: 4.08}
+      - {soc: 1.00, v: 4.20}
+
+  initial_soc:
+    value: 1.0
+    units: fraction
+    measured: false
+    source: "sim initial condition, not a property of the quad"
+
+# ---------------------------------------------------------------------------
+aero:
+  # Body-frame drag. F_drag = -(linear .* v_body) - (quadratic .* v_body .* |v_body|)
+  linear_drag:
+    value: [0.05, 0.05, 0.08]
+    units: N/(m/s)
+    measured: false
+    source: "PLACEHOLDER: small linear term for low-speed damping. Fit in Phase 4."
+
+  quadratic_drag:
+    value: [0.0060, 0.0060, 0.0110]
+    units: N/(m/s)^2
+    measured: false
+    source: "PLACEHOLDER: 0.5*rho*Cd*A with A~0.010 m^2 frontal / 0.018 m^2 plan,
+      Cd~1.0. Fit against real Blackbox speed/attitude data in Phase 4."
+
+  induced_drag_k:
+    # extra in-plane force proportional to total thrust and in-plane airspeed;
+    # this is what makes a real quad lose altitude in fast forward flight
+    value: 0.010
+    units: "1/(m/s)"
+    measured: false
+    source: "PLACEHOLDER: fit in Phase 4"
+
+  angular_damping:
+    value: [2.0e-4, 2.0e-4, 4.0e-4]
+    units: "N*m/(rad/s)"
+    measured: false
+    source: "PLACEHOLDER: aerodynamic rate damping; affects the tail of a step
+      response, so the Phase 4 gyro overlay is what sets it"
+
+  air_density:
+    value: 1.225
+    units: kg/m^3
+    measured: false
+    source: "ISA sea level; set to your field's density altitude if it matters"
+
+# ---------------------------------------------------------------------------
+imu:
+  # Synthesised gyro/accel handed to Betaflight. Accel reports SPECIFIC FORCE:
+  # at rest it reads [0, 0, -9.80665] in FRD.
+  sample_rate:
+    value: 8000.0
+    units: Hz
+    measured: false
+    source: "PLACEHOLDER: must match the gyro rate in diff_all.txt (gyro_hardware_lpf
+      / looptime). Read it off the real config."
+
+  gyro_noise_density:
+    value: 0.004
+    units: "rad/s/sqrt(Hz)"
+    measured: false
+    source: "PLACEHOLDER: ICM-42688-P class part. Fit from a stationary Blackbox log."
+
+  gyro_bias:
+    value: [0.0, 0.0, 0.0]
+    units: rad/s
+    measured: false
+    source: "PLACEHOLDER: zero; Betaflight calibrates this out anyway"
+
+  gyro_bias_walk:
+    value: 1.0e-5
+    units: "rad/s/sqrt(s)"
+    measured: false
+    source: "PLACEHOLDER"
+
+  accel_noise_density:
+    value: 0.002
+    units: "m/s^2/sqrt(Hz)"
+    measured: false
+    source: "PLACEHOLDER: fit from a stationary Blackbox log"
+
+  accel_bias:
+    value: [0.0, 0.0, 0.0]
+    units: m/s^2
+    measured: false
+    source: "PLACEHOLDER"
+
+  # Vibration injection. Off until the basics match; then use it to reproduce
+  # the noise floor seen in the real logs.
+  vibration_enabled:
+    value: 0.0
+    units: bool
+    measured: false
+    source: "sim option, not a property of the quad"
+
+# ---------------------------------------------------------------------------
+ground:
+  height:
+    value: 0.0
+    units: m
+    measured: false
+    source: "sim world definition, not a property of the quad"
+
+  contact_stiffness:
+    value: 8000.0
+    units: N/m
+    measured: false
+    source: "PLACEHOLDER: penalty contact, tuned for stability at 1 kHz not realism"
+
+  contact_damping:
+    value: 60.0
+    units: "N/(m/s)"
+    measured: false
+    source: "PLACEHOLDER: ~critically damped for 0.72 kg on the stiffness above"
+
+  friction:
+    value: 0.6
+    units: dimensionless
+    measured: false
+    source: "PLACEHOLDER: rubber-ish feet on grass/concrete"
+
+  # Height of the lowest contact point below the CG, body +z.
+  stand_height:
+    value: 0.030
+    units: m
+    measured: false
+    source: "PLACEHOLDER: measure CG height above ground with the quad sat on a table"
+
+# ---------------------------------------------------------------------------
+camera:
+  tilt:
+    # Up-tilt of the camera from the body +x axis, degrees. 0 = looks straight
+    # forward; positive = looks up (the usual FPV tilt).
+    value: 30.0
+    units: deg
+    measured: false
+    source: "PLACEHOLDER: measure with a protractor or a phone level against the
+      camera face"
+
+  fov_horizontal:
+    value: 120.0
+    units: deg
+    measured: false
+    source: "PLACEHOLDER: from the camera spec sheet"
+
+  position:
+    value: [0.060, 0.0, -0.020]
+    units: m
+    measured: false
+    source: "PLACEHOLDER: camera lens position from CG, body frame"
+
+# ---------------------------------------------------------------------------
+sim:
+  physics_rate:
+    value: 2000.0
+    units: Hz
+    measured: false
+    source: "sim setting, not a property of the quad"
+
+  viewer_rate:
+    value: 120.0
+    units: Hz
+    measured: false
+    source: "sim setting, not a property of the quad"
+
+  # Ports. The SITL ones are UNVERIFIED until read out of the Betaflight source;
+  # see docs/sitl_interface.md.
+  net:
+    sitl_verified: false
+    sitl_host: "127.0.0.1"
+    sitl_fdm_port: 9003            # UNVERIFIED: physics -> SITL state
+    sitl_motor_port: 9002          # UNVERIFIED: SITL -> physics motor outputs
+    sitl_rc_port: 9004             # UNVERIFIED: physics -> SITL RC channels
+    sitl_configurator_tcp: 5761    # UNVERIFIED: Configurator connects here
+    viewer_host: "127.0.0.1"
+    viewer_pose_port: 9100         # ours, DEFINED
