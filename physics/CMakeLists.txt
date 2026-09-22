@@ -42,6 +42,7 @@ if(FDT_BUILD_TESTS)
     tests/test_aero_ground.cpp
     tests/test_imu.cpp
     tests/test_multirotor.cpp
+    tests/test_sitl_packets.cpp
   )
   target_link_libraries(fdt_physics_tests PRIVATE fdt_physics GTest::gtest_main fdt_warnings)
   target_compile_definitions(fdt_physics_tests PRIVATE FDT_REPO_ROOT="${FDT_REPO_ROOT}")

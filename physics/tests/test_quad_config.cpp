@@ -354,7 +354,7 @@ TEST(QuadConfig, NonScalarBetaflightOrderValueIsAConfigErrorNotACrash) {
 }
 
 TEST(QuadConfig, NonBooleanSitlVerifiedFlagIsAConfigErrorNotACrash) {
-  const auto text = withSubstitution(shippedConfigText(), "sitl_verified: false", "sitl_verified: perhaps");
+  const auto text = withSubstitution(shippedConfigText(), "sitl_verified: true", "sitl_verified: perhaps");
   EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
 }
 

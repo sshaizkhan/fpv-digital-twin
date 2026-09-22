@@ -414,14 +414,14 @@ sim:
     measured: false
     source: "sim setting, not a property of the quad"
 
-  # Ports. The SITL ones are UNVERIFIED until read out of the Betaflight source;
-  # see docs/sitl_interface.md.
+  # Ports, all VERIFIED against the Betaflight source at tag 4.5.1 and
+  # confirmed against a running SITL. See docs/sitl_interface.md section 2.
   net:
-    sitl_verified: false
+    sitl_verified: true
     sitl_host: "127.0.0.1"
-    sitl_fdm_port: 9003            # UNVERIFIED: physics -> SITL state
-    sitl_motor_port: 9002          # UNVERIFIED: SITL -> physics motor outputs
-    sitl_rc_port: 9004             # UNVERIFIED: physics -> SITL RC channels
-    sitl_configurator_tcp: 5761    # UNVERIFIED: Configurator connects here
+    sitl_fdm_port: 9003            # physics -> SITL state   (sitl.c:82, SITL binds)
+    sitl_motor_port: 9002          # SITL -> physics motors  (sitl.c:81)
+    sitl_rc_port: 9004             # physics -> SITL RC      (sitl.c:83, SITL binds)
+    sitl_configurator_tcp: 5761    # Configurator (serial_tcp.c:41,113 -> UART1)
     viewer_host: "127.0.0.1"
     viewer_pose_port: 9100         # ours, DEFINED

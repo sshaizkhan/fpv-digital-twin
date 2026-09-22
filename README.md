@@ -17,7 +17,7 @@ macOS / Apple Silicon.
 |---|---|---|
 | 0 | Repo scaffold, CMake build, `quad.yaml` schema, README | ✅ done |
 | 1 | Physics core standalone, with unit tests | ✅ done |
-| 2 | Betaflight SITL builds and runs, loop closed, stable hover | unblocked, not started |
+| 2 | Betaflight SITL builds and runs, loop closed, stable hover | in progress: SITL runs, Configurator path proven; bridge next |
 | 3 | Radio input live, Godot viewer, acro flight from FPV | not started |
 | 4 | Blackbox replay, sim-vs-real overlay, parameter fitting | not started |
 
@@ -33,7 +33,10 @@ physics/     C++17 core. Phase 1 ships the 6DOF integrator, motor,
              battery, aero, ground-contact and IMU models, assembled in
              Multirotor, plus the quad.yaml loader. The SITL / SDL2 /
              viewer I/O follows in later phases.
-third_party/ Betaflight submodule (Phase 2), pinned to the FC's firmware tag.
+third_party/ Betaflight, pinned to 4.5.1 -- the exact commit the FC runs.
+docker/      SITL image. Native macOS cannot link 4.5.1's SITL target
+             (Apple ld64 has no GNU linker-script support), so SITL runs
+             in Docker. See docs/sitl_interface.md section 6.
 viewer/      Godot 4 FPV view (Phase 3).
 tools/       Python: Blackbox parsing, stick replay, fitting (Phase 4).
 config/      quad.yaml — every physical parameter, with provenance.

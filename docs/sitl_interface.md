@@ -1,123 +1,293 @@
 # Betaflight SITL interface
 
-**Status: NOTHING HERE IS VERIFIED YET. This is the Phase 2 work list, not a
-specification.** Every row below must be filled in by reading the Betaflight
-source at the tag pinned in `third_party/betaflight`, with a file-and-line
-citation, before any code depends on it. Ports and layouts have changed between
-Betaflight releases, so a number found in a blog post or in another simulator is
-not evidence.
+**Everything below was read out of the Betaflight source at tag `4.5.1`**,
+commit `77d01ba3b76a22909d5f09cb0628820141f95eaa` — which is byte-for-byte the
+commit string in the FC's own `diff all` header, so the source being cited is
+the firmware the quad actually flies. Every claim carries a file and line.
 
-Where to read (paths are as of recent Betaflight; confirm at the pinned tag):
+Status legend: **VERIFIED** (read in source, cited) · **UNVERIFIED** (not yet
+checked — do not build on it) · **MEASURED** (confirmed against a running SITL).
 
-- `src/main/target/SITL/` — the SITL target: `sitl.c`, `target.h`, `target.mk`
-- `src/main/drivers/serial_tcp.c` — the TCP serial link the Configurator uses
-- The `dyad` event loop and the UDP helpers SITL uses for its packet links
+Paths are relative to `third_party/betaflight/`.
 
-## 1. Firmware pin — RESOLVED
+---
 
-| Item | Value | Verified |
-|------|-------|----------|
-| FC firmware version | **Betaflight 4.5.1** (Jul 27 2024, commit `77d01ba3b`) | ✅ `config/diff_all.txt` header |
-| MSP API | 1.46 | ✅ same header |
-| Target name | `SPEEDYBEEF405V4` (STM32F405, `SPBE`) | ✅ `board_name` in `config/dump_all.txt` |
-| Submodule tag in `third_party/betaflight` | `4.5.1` — **not yet added** | ❌ |
+## 1. Firmware pin — VERIFIED
 
-`config/quad.yaml: firmware.betaflight_version` is now pinned to `4.5.1`, and a
-test asserts that version actually appears in the dump headers so the pin
-cannot drift from the hardware.
+| Item | Value | Evidence |
+|---|---|---|
+| Firmware | Betaflight 4.5.1 | `config/diff_all.txt` header |
+| Commit | `77d01ba3b76a2290…` | `git rev-parse HEAD` in the submodule matches the dump header |
+| Target | `SPEEDYBEEF405V4` | `board_name` in `config/dump_all.txt` |
 
-**Read every interface detail below at tag `4.5.1`, not at master.** Ports and
-packet layouts have changed between releases.
+The broader read of the FC config — mixer, ESC protocol, filters, tune, rates,
+modes — is in [`fc_config.md`](fc_config.md).
 
-A fuller read of the two CLI dumps — mixer, ESC protocol, filters, tune, rates,
-modes, battery, logging — is in [`fc_config.md`](fc_config.md).
+## 2. Transport and ports — VERIFIED
 
-## 2. Transport and ports
+`src/main/target/SITL/sitl.c:80-83`:
 
-| Link | Direction | Proto | Port | Verified |
-|------|-----------|-------|------|----------|
-| FDM / state | physics → SITL | UDP | ? (placeholder 9003) | ❌ |
-| Motor / servo outputs | SITL → physics | UDP | ? (placeholder 9002) | ❌ |
-| RC channels | physics → SITL | UDP | ? (placeholder 9004) | ❌ |
-| Configurator (MSP over TCP serial) | Configurator → SITL | TCP | ? (placeholder 5761) | ❌ |
+```c
+#define PORT_PWM_RAW    9001    // Out
+#define PORT_PWM        9002    // Out
+#define PORT_STATE      9003    // In
+#define PORT_RC         9004    // In
+```
 
-To verify: find the port constants in the SITL target source; confirm which side
-binds and which side connects; confirm whether the RC channels ride in their own
-packet or inside the FDM packet.
+| Link | Direction | Proto | Port | Who binds | Evidence |
+|---|---|---|---|---|---|
+| State / FDM | physics → SITL | UDP | 9003 | **SITL binds** (server) | `sitl.c:316` `udpInit(&stateLink, NULL, PORT_STATE, true)` |
+| RC channels | physics → SITL | UDP | 9004 | **SITL binds** (server) | `sitl.c:319` `udpInit(&rcLink, NULL, PORT_RC, true)` |
+| Motor output | SITL → physics | UDP | 9002 | SITL sends (client) | `sitl.c:310`, sent at `sitl.c:599` |
+| Motor raw (RealFlight) | SITL → physics | UDP | 9001 | SITL sends (client) | `sitl.c:313`, sent at `sitl.c:601` |
+| Configurator (MSP) | Configurator → SITL | TCP | **5761** | SITL listens | `serial_tcp.c:41` `BASE_PORT 5760`, `:113` `dyad_listenEx(..., BASE_PORT + id + 1, ...)` → UART1 = 5761 |
 
-## 3. Packet structs
+The placeholder ports in `config/quad.yaml` were right, and `sim.net.sitl_verified`
+can now be flipped to `true`.
 
-Copy the struct definitions **verbatim** from the Betaflight source into
-`physics/include/fdt/sitl_packets.hpp`, with the source path and line noted, then
-`static_assert` the sizes. Do not re-type them from a table.
+**RC is a separate packet on its own port**, not part of the FDM packet.
 
-For each packet record:
+**The destination address for the outbound motor packets is `argv[1]`**
+(`sitl.c:26-36`, default `127.0.0.1`), and it is passed straight to
+`inet_addr()` (`udplink.c:36`) — **dotted IPv4 only, no hostname resolution.**
+This is what the Docker entrypoint has to work around.
 
-- [ ] exact field order and C types
-- [ ] `sizeof` and any padding / packing attribute
-- [ ] endianness on the wire
-- [ ] a `timestamp` field, if any: units (s? µs?) and epoch
-- [ ] whether the packet is sent every step or on request
+## 3. Packet structs — VERIFIED
 
-## 4. Semantics that must be checked field by field
+`src/main/target/SITL/target.h:255-277`. Sizes and offsets below were confirmed
+by compiling the structs and printing `sizeof`/`offsetof` (LP64, natural
+alignment, no packing attributes — all fields are naturally aligned, so there
+is no padding surprise except the 2 bytes after `motorCount`).
 
-These are the ones that silently produce a plausible-but-wrong sim:
+### `fdm_packet` — physics → SITL, 144 bytes
 
-- [ ] **Angular rate units** — rad/s or deg/s?
-- [ ] **Angular rate signs** — per axis, versus our FRD convention
-      (docs/coordinate_frames.md §4). Test each axis separately.
-- [ ] **Accelerometer** — specific force or acceleration? In g or m/s²? Sign of
-      the down axis at rest?
-- [ ] **Attitude** — does SITL want a quaternion, a rotation matrix, or Euler
-      angles? Which order, which handedness, scalar-first or scalar-last?
-- [ ] **Position / velocity frame** — NED, ENU, or something local? Metres?
-- [ ] **Motor output range** — `[0, 1]`, `[-1, 1]`, or raw DSHOT? Does it
-      already have the idle offset / `motor_output_limit` applied?
-- [ ] **Motor index → physical position**, and whether SITL applies the mixer
-      ordering or expects us to. This is the mapping flagged
-      `verified: false` in `config/quad.yaml: motors.betaflight_order`.
-- [ ] **RC channel order and range** — AETR vs TAER, 1000–2000 vs something else.
-- [ ] **Gyro alignment.** The real FC has `gyro_1_sensor_align = CW90`, i.e. the
-      IMU is mounted rotated and Betaflight rotates it internally. Determine
-      whether SITL applies board/sensor alignment to the gyro it receives, or
-      expects data already in FC frame, and whether a SITL build even reads
-      that setting. Getting this wrong swaps roll and pitch.
-- [ ] **Motor idle.** The FC runs `dshot_idle_value = 550` (5.5%). Check
-      whether SITL's motor output already includes the idle offset or whether
-      the physics side must apply it.
-- [ ] **AIRMODE is ON** (a 4.5 default, so it does not appear in `diff all` --
-      see [`fc_config.md`](fc_config.md)). Betaflight keeps full PID authority
-      at zero throttle and raises motors above idle to hold attitude rather
-      than cutting them. Confirm SITL comes up with airmode enabled, and do not
-      expect motors to drop to idle at low stick.
-- [ ] **Time** — does SITL free-run, or does it step when we send a packet? This
-      decides whether the project's "faster than real time, deterministic
-      replay" requirement is achievable, and how.
+| Offset | Field | Type | Units / frame |
+|---|---|---|---|
+| 0 | `timestamp` | `double` | **seconds** |
+| 8 | `imu_angular_velocity_rpy[3]` | `double[3]` | **rad/s** |
+| 32 | `imu_linear_acceleration_xyz[3]` | `double[3]` | **m/s², body frame** |
+| 56 | `imu_orientation_quat[4]` | `double[4]` | **w, x, y, z — scalar first** |
+| 88 | `velocity_xyz[3]` | `double[3]` | m/s, earth frame |
+| 112 | `position_xyz[3]` | `double[3]` | m, **NED** from origin |
+| 136 | `pressure` | `double` | Pa (fed to the virtual baro, `sitl.c:149`) |
 
-## 5. Tests to write alongside (Phase 2)
+The quaternion is **scalar-first**, matching our own wire convention, and
+position is **NED**, matching our world frame. Those two cost us nothing.
 
-Per the project working rules, each of these gets a test that fails on a sign or
-index swap:
+### `rc_packet` — physics → SITL, 40 bytes
 
-1. Round-trip pack/unpack of each struct against a captured golden byte buffer.
-2. One test per gyro axis: spin the model about one body axis, assert the sign
-   and magnitude of the value SITL receives.
-3. Accelerometer at rest reads `+1 g` on the correct axis with the correct sign.
-4. One test per motor: command motor `N` only, assert the expected physical
-   motor produces thrust and the expected roll/pitch/yaw torque signs follow.
-5. RC channel mapping: full-right roll stick lands in the channel Betaflight
-   reads as roll, at the right end of the range.
-6. Hover/arming motor outputs: with AIRMODE on, assert that at low throttle the
-   motors sit **above** idle and still respond to attitude error. Writing this
-   test expecting motors at idle will produce a mismatch that looks like a
-   physics bug and is not one.
+| Offset | Field | Type | Notes |
+|---|---|---|---|
+| 0 | `timestamp` | `double` | seconds |
+| 8 | `channels[16]` | `uint16_t[16]` | `SIMULATOR_MAX_RC_CHANNELS = 16` (`target.h:238`) |
 
-## 6. macOS build
+Channel values are used **raw, as microseconds** — `readRCSITL` returns
+`rcPkt.channels[channel]` with no scaling (`sitl.c:228-232`). So 1000–2000,
+1500 centre. The debug print at `sitl.c:249-251` labels channels 0-3 as
+**AETR** (roll, pitch, throttle, yaw) and 4-7 as AUX1-4.
 
-Preferred: native build of the SITL target on Apple Silicon.
+### `servo_packet` — SITL → physics, 16 bytes
 
-- [ ] `make TARGET=SITL` (or the current equivalent) at the pinned tag
-- [ ] record every patch needed, and why
-- [ ] if native fails after reasonable patching, add `docker/Dockerfile.sitl`
-      with the UDP ports and TCP 5761 mapped, and note the loopback/latency
-      implications of the Docker network for the Phase 3 latency measurement
+| Offset | Field | Type | Range |
+|---|---|---|---|
+| 0 | `motor_speed[4]` | `float[4]` | `[0.0, 1.0]` normal, `[-1.0, 1.0]` with FEATURE_3D |
+
+### `servo_packet_raw` — SITL → physics, 68 bytes
+
+`uint16_t motorCount` at 0, `float pwm_output_raw[16]` at **4** (2 bytes of
+padding). Raw PWM 1100–1900. This is the RealFlight bridge format; we use
+`servo_packet` on 9002 and can ignore 9001.
+
+## 4. Semantics — the parts that silently produce a wrong sim
+
+### 4.1 Motor ordering is PERMUTED — VERIFIED, and this is the big one
+
+`sitl.c:592-595`:
+
+```c
+pwmPkt.motor_speed[3] = motorsPwm[0] / outScale;   // BF motor 1 -> slot 3
+pwmPkt.motor_speed[0] = motorsPwm[1] / outScale;   // BF motor 2 -> slot 0
+pwmPkt.motor_speed[1] = motorsPwm[2] / outScale;   // BF motor 3 -> slot 1
+pwmPkt.motor_speed[2] = motorsPwm[3] / outScale;   // BF motor 4 -> slot 2
+```
+
+The comment at `sitl.c:585` says this remap exists "for gazebo8
+ArduCopterPlugin". **The packet is NOT in Betaflight motor order.** Slot `i` of
+`motor_speed` carries Betaflight motor index `(i + 1) mod 4`, i.e.
+
+| packet slot | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| Betaflight motor (1-based) | 2 | 3 | 4 | 1 |
+
+This is on top of, not instead of, Betaflight's own index → physical position
+mapping, which is still **UNVERIFIED** (see §7).
+
+### 4.2 Motor scaling — VERIFIED
+
+`sitl.c:557` `motorsPwm[index] = value - idlePulse`, then `/ outScale` where
+`outScale = 1000.0` (`sitl.c:587`, or 500.0 with FEATURE_3D at `:588-590`).
+`idlePulse` comes from `motorPwmDevInit` (`sitl.c:629-637`). So the value on
+the wire is throttle above idle, normalised — **the idle offset is already
+subtracted** and we must not apply it again.
+
+### 4.3 Gyro signs — VERIFIED (roll straight through, pitch and yaw negated)
+
+`sitl.c:142-144`:
+
+```c
+x = constrain( pkt->imu_angular_velocity_rpy[0] * GYRO_SCALE * RAD2DEG, ...);
+y = constrain(-pkt->imu_angular_velocity_rpy[1] * GYRO_SCALE * RAD2DEG, ...);
+z = constrain(-pkt->imu_angular_velocity_rpy[2] * GYRO_SCALE * RAD2DEG, ...);
+```
+
+`GYRO_SCALE = 16.4` and `RAD2DEG = 180/π` (`sitl.c:105-106`), i.e. the packet
+is rad/s and SITL converts to deg/s at the 16.4 LSB/(deg/s) scale of a ±2000
+deg/s gyro.
+
+X passes through, Y and Z are flipped. That is exactly an FRD ↔ FLU handedness
+flip on two axes, which says the packet is **not** in Betaflight's internal
+axis convention. Our FRD body frame is the natural candidate for the packet
+side, but **which of our axes ends up where is still UNVERIFIED** — it must be
+confirmed empirically per axis (§7).
+
+### 4.4 Accelerometer — VERIFIED as written, semantics UNVERIFIED
+
+`sitl.c:136-138` negates **all three** axes:
+
+```c
+x = constrain(-pkt->imu_linear_acceleration_xyz[0] * ACC_SCALE, ...);
+y = constrain(-pkt->imu_linear_acceleration_xyz[1] * ACC_SCALE, ...);
+z = constrain(-pkt->imu_linear_acceleration_xyz[2] * ACC_SCALE, ...);
+```
+
+`ACC_SCALE = 256 / 9.80665` (`sitl.c:105`) — Betaflight's 1 g = 256 counts.
+
+Note this is a **different** sign pattern from the gyro (all three, versus two).
+Whether the field is specific force or kinematic acceleration is not stated
+anywhere beyond the field name, and the two sign patterns cannot both be a pure
+frame rotation. **Do not guess this — settle it empirically** (§7).
+
+### 4.5 Attitude comes from the packet, NOT from the IMU — VERIFIED
+
+`target.h:48` is `#undef USE_IMU_CALC`, so the `#if !defined(USE_IMU_CALC)`
+block at `sitl.c:150-179` is live, and `SET_IMU_FROM_EULER` is not defined, so
+the active line is `sitl.c:177`:
+
+```c
+imuSetAttitudeQuat(pkt->imu_orientation_quat[0], ..., [3]);
+```
+
+**Betaflight does not run its attitude estimator under SITL — it takes our
+quaternion directly.** Consequences:
+
+- Our quaternion must be correct in Betaflight's own convention, and an error
+  there will not be "corrected" by the accelerometer.
+- The accelerometer matters much less than it would on real hardware. It is
+  still fed to the virtual device, but attitude does not depend on it.
+- Attitude-mode (`ANGLE`/`HORIZON`, both configured — see `fc_config.md`) will
+  behave off our quaternion.
+
+### 4.6 Timing — VERIFIED
+
+- `timestamp` is seconds, and SITL derives `deltaSim` from successive packets
+  (`sitl.c:130`). Negative deltas are dropped (`:131-133`).
+- A gap over **500 ms** resets the clock and returns early (`sitl.c:122-128`).
+- SITL expects the simulator to **run faster than 50 Hz**: `deltaSim < 0.02`
+  gates the rate tracking (`sitl.c:187`).
+- **Lock-step: "get one fdm_packet can only send one servo_packet"**
+  (`sitl.c:597`). The motor send is gated on `pthread_mutex_trylock(&updateLock)`
+  (`:598`), unlocked by `updateState` (`:201`). So the loop is driven by our
+  state packets — good for deterministic replay.
+- `SIMULATOR_GYROPID_SYNC` / `SIMULATOR_IMU_SYNC` are **commented out**
+  (`target.h:50-53`), so SITL free-runs its scheduler rather than stepping per
+  packet.
+
+### 4.7 RC is required before anything works — VERIFIED
+
+`sitl.c:240-265`: the RX provider is only installed on the **first** RC packet
+(`if (!rc_received)`, `:248`), which sets `rxRuntimeState.rcReadRawFn`,
+`channelCount = 16` and `rxProvider = RX_PROVIDER_UDP`. Until then Betaflight
+has no receiver at all. **Send RC before expecting to arm.**
+
+## 5. Still UNVERIFIED — settle empirically against a running SITL
+
+These cannot be read off cleanly, and guessing them is how the sim ends up
+plausible but wrong. Each gets a test that fails on a sign or index swap.
+
+1. **Gyro axis mapping and signs**, per axis: rotate the model about one body
+   axis, read what Betaflight reports (MSP attitude / Blackbox), confirm sign
+   and magnitude.
+2. **Accelerometer semantics**: specific force or acceleration, and the frame.
+   Park level and confirm Betaflight reads 1 g the right way up; then hover.
+3. **Quaternion convention**: confirm a known attitude round-trips to the
+   Configurator's attitude indicator.
+4. **Betaflight motor index → physical position** for `mixer QUADX` at 4.5.1,
+   which is still unread and is what `motors.betaflight_order` in
+   `config/quad.yaml` is flagged `verified: false` for. Combine with the §4.1
+   permutation.
+5. **Prop spin direction per index**, with `yaw_motors_reversed = OFF`.
+6. **RC channel order** — the AETR labelling at `sitl.c:249` is a debug string,
+   not a contract. Confirm against `rcmap` handling.
+
+## 6. Building on macOS — native FAILS, Docker works
+
+**Native Apple Silicon: all 257 objects compile, the LINK cannot work.**
+
+Compilation needed no source changes, only flags:
+
+```sh
+make TARGET=SITL ARM_SDK_DIR=/usr \
+  EXTRA_FLAGS="-Wno-unknown-warning-option -Wno-ignored-optimization-argument \
+               -Wno-strict-prototypes -Wno-double-promotion \
+               -Wno-unknown-pragmas -Wno-unneeded-internal-declaration"
+```
+
+Why each is needed:
+
+| Flag | Reason |
+|---|---|
+| `ARM_SDK_DIR=/usr` | `mk/tools.mk` is included at `Makefile:104`, *before* the SITL target blanks `ARM_SDK_PREFIX` at `mk/mcu/SITL.mk:15`, so it demands `arm-none-eabi-gcc` even for a host build. Pointing it at any existing directory takes the branch that skips the check. |
+| `-Wno-unknown-warning-option` | `Makefile:256` and `:249` pass GCC-only warnings (`-Wunsafe-loop-optimizations`, `-Wold-style-definition`). |
+| `-Wno-ignored-optimization-argument` | `Makefile:153` passes GCC's `-fuse-linker-plugin`. |
+| `-Wno-strict-prototypes` | Upstream headers declare `f()` without prototypes. |
+| `-Wno-double-promotion` | `sitl.c:272-273` passes `float` literals to dyad's `double` parameters. |
+| `-Wno-unknown-pragmas` | **Upstream bug:** `msp.c:343` has `#pragma GCC diagnostic ignored` with no matching `push`, but `:351` does `pop`. GCC tolerates it, clang does not. |
+| `-Wno-unneeded-internal-declaration` | `voltage.c:150` `voltageMeterAdcChannelMap` is unused in a SITL build. |
+
+Then the link fails, and this one is not a flag problem:
+
+```
+ld: unknown options: -gc-sections -Map --cref -T
+```
+
+`mk/mcu/SITL.mk:43-54` links with `-T src/main/target/SITL/pg.ld`, plus
+`-gc-sections`, `--cref` and `-lrt`. `pg.ld` is a **GNU linker script** that
+creates the `.pg_registry` section and the `__pg_registry_start` /
+`__pg_registry_end` symbols that Betaflight's entire parameter-group config
+system is built on. **Apple's `ld64` has no linker-script support**, so there
+is nothing to translate these to; `-lrt` also does not exist on macOS. Making
+this work would mean reimplementing the parameter-group section layout for
+Mach-O — a port, not a patch, and one that would have to be redone against a
+submodule we deliberately keep unmodified.
+
+So: **Docker**, which CLAUDE.md names as the sanctioned fallback.
+
+```sh
+./tools/run_sitl.sh          # build the image if needed, then run it
+```
+
+See [`../docker/Dockerfile.sitl`](../docker/Dockerfile.sitl). It fetches
+Betaflight **by commit** and asserts the checkout matches, so the image cannot
+drift from `third_party/betaflight`. The entrypoint resolves the host to a
+numeric IP because of the `inet_addr()` limit in §2.
+
+Ports published: `5761/tcp` (Configurator), `9001-9004/udp`.
+`/data` holds `eeprom.bin` — **mount it or the pasted config is lost** when the
+container is removed.
+
+### Docker latency caveat for Phase 3
+
+The Phase 3 acceptance criterion is measured end-to-end input latency. Docker
+Desktop on macOS runs containers inside a VM, and the UDP round trip crosses
+that boundary, so it adds latency that the real FC does not have. Measure and
+report the containerised number, but do not mistake it for the hardware figure.

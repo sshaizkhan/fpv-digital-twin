@@ -33,3 +33,6 @@ out/
 .vscode/
 .idea/
 *.swp
+
+# SITL container state (eeprom.bin lives here)
+.sitl-state/
