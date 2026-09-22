@@ -243,7 +243,73 @@ Roll and yaw pass straight through; **pitch comes back negated**. Note the
 matching comment on the (uncompiled) Euler path at `sitl.c:175`: "yes! pitch
 was inverted!!" — `imuSetAttitudeQuat` evidently shares that handedness.
 
-### Gyro — UNRESOLVED, reads a flat zero
+### Gyro — ROOT CAUSE FOUND: TASK_GYRO, TASK_FILTER and TASK_PID never execute
+
+**The gyro is not the problem. The three realtime tasks never run at all.**
+
+Betaflight's own task table, read over the CLI while SITL was streaming
+(`tasks`):
+
+```
+Task list             rate/hz  max/us  avg/us maxload avgload  total/ms
+02 - (           GYRO)      0       0       0    0.0%    0.0%         0
+03 - (         FILTER)      0       0       0    0.0%    0.0%         0
+04 - (            PID)      0       0       0    0.0%    0.0%         0
+05 - (            ACC)    224     188       0    4.2%    0.0%        26
+06 - (       ATTITUDE)     27      45       0    0.1%    0.0%         3
+14 - (           BARO)     15      67       1    0.1%    0.0%         7
+```
+
+GYRO, FILTER and PID have executed for a total of **0 ms** since boot. Every
+other task runs normally. That single fact explains BOTH Phase 2 blockers:
+
+- **No gyro.** `virtualGyroRead` is only called from `gyroUpdateSensor`, inside
+  TASK_GYRO. It never runs, so `gyroADCRaw` is never written and the whole
+  chain downstream reads zero.
+- **No motor packets.** `pwmCompleteMotorUpdate` — which is what sends the
+  servo_packet (`sitl.c:582-602`) — is driven by the PID loop. It never runs,
+  so SITL has nothing to send. This was previously blamed on
+  `motor_pwm_protocol` being DISABLED; that is a real issue too, but it is not
+  why the packets were missing.
+
+The accelerometer works because TASK_ACCEL is an ordinary-priority task
+scheduled through the normal path, while GYRO/FILTER/PID are all
+`TASK_PRIORITY_REALTIME` (`fc/tasks.c:361-363`) and run **only** inside the
+`if (gyroEnabled)` block at `scheduler.c:488-533`.
+
+#### Where to pick this up
+
+`gyroEnabled` is set by `schedulerEnableGyro()` (`scheduler.c:801-803`), called
+from `fc/tasks.c:500-508` — but only inside `if (sensors(SENSOR_GYRO))`, the
+same block that does `setTaskEnabled(TASK_GYRO, true)`. The three tasks DO
+appear in the task list, which means that block ran and they are enabled. So
+either `gyroEnabled` is false anyway (an ordering problem between `tasksInit`
+and sensor detection), or the block is entered and the timing test at
+`scheduler.c:515` (`schedLoopRemainingCycles < schedLoopStartCycles`) is never
+satisfied.
+
+The next step is to distinguish those two, which needs visibility inside the
+scheduler rather than more MSP probing.
+
+#### Evidence gathered, so the next attempt does not repeat it
+
+| Checked | Result |
+|---|---|
+| Gyro detected | YES — `status`: "Gyros detected: gyro 1, gyro 2", `GYRO=VIRTUAL`; MSP_STATUS sensors bit 5 set |
+| `gyro_to_use` | `FIRST`, and `rawSensorDev` points at `gyroSensor1`, so no device mismatch |
+| Both sensors' raw | `DEBUG_DUAL_GYRO_RAW` shows s1 **and** s2 both zero — data is not landing in the other slot |
+| Calibration | Complete; and forced complete from boot for `GYRO_VIRTUAL` anyway (`gyro.c:174-182`) |
+| `gyroADCRaw` at source | Zero — `DEBUG_GYRO_RAW`, so the break is upstream of all filtering and scaling |
+| Betaflight's clock | **Advancing** — `System Uptime` climbs ~8 s per 4 s real. Not frozen. |
+| `simRate` starvation | Ruled out: streaming with timestamps taken from real elapsed time changed nothing |
+| `SystemCoreClock` | Set to 500 MHz (`sitl.c:292`); the cycle helpers are sane stubs (`sitl.c:430-452`) |
+| `gyroSyncCheckUpdate` double-consume | Dead code — never called anywhere in the tree |
+| `gyroSetSampleRate` | Returns 8000 Hz via the `default:` branch (`gyro_sync.c:87-91`), not 0 |
+| `CPU: 0%` in `status` | **Cosmetic.** Hardcoded for `SIMULATOR_BUILD` (`scheduler.c:207-209`) — not a symptom |
+
+### Superseded: earlier notes on this, kept because they were wrong
+
+
 
 Sending 1 rad/s (and 10 rad/s) on one `imu_angular_velocity_rpy` axis at a time
 produces `gyro[X,Y,Z] = 0, 0, 0` from MSP_RAW_IMU, while the accelerometer in
