@@ -353,6 +353,7 @@ struct QuadConfigParser {
     const YAML::Node mdl = require(mo, "model", "motors");
     auto& M = cfg.motors.model;
     M.kv = num(mdl, "kv", "motors.model");
+    M.poles = integer(mdl, "poles", "motors.model");
     M.load_factor = num(mdl, "load_factor", "motors.model");
     M.thrust_coeff = num(mdl, "thrust_coeff", "motors.model");
     M.torque_coeff = num(mdl, "torque_coeff", "motors.model");
@@ -361,6 +362,9 @@ struct QuadConfigParser {
     M.resistance = num(mdl, "resistance", "motors.model");
     M.max_rpm_safety = num(mdl, "max_rpm_safety", "motors.model");
     requirePositive(M.kv);
+    if (M.poles.value < 2 || M.poles.value % 2 != 0) {
+      bad(M.poles.path, "a brushless motor has an even number of magnet poles, at least 2");
+    }
     requirePositive(M.load_factor);
     if (M.load_factor.value > 1.0) {
       bad(M.load_factor.path, "a loaded prop cannot spin faster than the no-load kv*V");

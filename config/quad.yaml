@@ -28,11 +28,13 @@ meta:
   frame_convention: "FRD_NED"   # must match docs/coordinate_frames.md
 
 firmware:
-  # Pins third_party/betaflight. Phase 2 cannot start until this is real:
-  # read it off the Configurator welcome screen or `version` in the CLI.
-  betaflight_version: null        # e.g. "4.5.1"
-  betaflight_git_tag: null        # e.g. "4.5.1"
-  target: "SPEEDYBEEF405V4"
+  # Pins third_party/betaflight. Read off the real FC on 2026-09-21; the
+  # version header of config/diff_all.txt is the citation:
+  #   Betaflight / STM32F405 (S405) 4.5.1 Jul 27 2024 / 04:05:41 (77d01ba3b)
+  #   MSP API: 1.46, config rev fb15bf8
+  betaflight_version: "4.5.1"
+  betaflight_git_tag: "4.5.1"     # upstream tag; commit 77d01ba3b
+  target: "SPEEDYBEEF405V4"       # board_name in the dump, manufacturer_id SPBE
   diff_all: "config/diff_all.txt" # `diff all` from the real FC, saved verbatim
   dump_all: "config/dump_all.txt" # `dump all` from the real FC, saved verbatim
 
@@ -97,8 +99,14 @@ motors:
   # Prop rotation as seen from ABOVE the quad. See docs/coordinate_frames.md §5.
   # "props in" = the leading edges of the front props sweep toward the centre.
   spin:
-    verified: false               # confirm against the real quad and yaw_motors_reversed
-    source: "Betaflight stock 'props in' assumed; NOT yet checked against the quad"
+    # config/dump_all.txt has `set yaw_motors_reversed = OFF`, so the firmware
+    # is expecting the stock direction and the props must be mounted to match
+    # or the quad would not fly. What that stock direction actually IS per
+    # motor index still has to come out of the Betaflight mixer source --
+    # see docs/sitl_interface.md -- so this stays unverified for now.
+    verified: false
+    source: "yaw_motors_reversed = OFF and `mixer QUADX` in config/dump_all.txt
+      confirm stock direction; the index -> direction mapping is still unread"
     FL: CW
     FR: CCW
     RL: CCW
@@ -108,8 +116,13 @@ motors:
   # DO NOT TRUST THIS. Phase 2 must derive it from the Betaflight source and
   # confirm it in the Configurator motor tab. See docs/sitl_interface.md.
   betaflight_order:
+    # config/dump_all.txt has `mixer QUADX`, `set mixer_type = LEGACY` and
+    # `smix reset`, i.e. the stock quad-X mixer with no custom overrides. The
+    # index -> position mapping is therefore whatever Betaflight 4.5.1 ships,
+    # which Phase 2 must read out of the source rather than assume.
     verified: false
-    source: "asserted from the conventional Betaflight quad-X layout; UNVERIFIED"
+    source: "stock `mixer QUADX`, LEGACY, no servo mix (config/dump_all.txt);
+      the actual index -> position mapping is still UNREAD"
     1: RR
     2: FR
     3: RL
@@ -121,6 +134,14 @@ motors:
       units: rpm/V
       measured: true
       source: "EMAX ECO II 2807 1700KV, from the motor spec"
+
+    poles:
+      # Magnet poles. DSHOT telemetry reports eRPM; mechanical RPM is
+      # eRPM / (poles / 2). Phase 4 needs this to read RPM out of a log.
+      value: 14
+      units: count
+      measured: true
+      source: "set motor_poles = 14 in config/dump_all.txt"
 
     thrust_coeff:
       # thrust [N] = kT * omega^2, omega in rad/s
@@ -269,8 +290,10 @@ imu:
     value: 8000.0
     units: Hz
     measured: false
-    source: "PLACEHOLDER: must match the gyro rate in diff_all.txt (gyro_hardware_lpf
-      / looptime). Read it off the real config."
+    source: "PLACEHOLDER. config/dump_all.txt gives gyro_hardware_lpf = NORMAL
+      and pid_process_denom = 2, but acc_hardware/gyro are AUTO so the dump does
+      not name the sensor, and the rate follows the detected chip. Confirm from
+      the Configurator Setup tab or CLI `status`, then set measured: true."
 
   gyro_noise_density:
     value: 0.004

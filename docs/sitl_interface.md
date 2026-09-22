@@ -13,17 +13,24 @@ Where to read (paths are as of recent Betaflight; confirm at the pinned tag):
 - `src/main/drivers/serial_tcp.c` — the TCP serial link the Configurator uses
 - The `dyad` event loop and the UDP helpers SITL uses for its packet links
 
-## 1. Firmware pin
+## 1. Firmware pin — RESOLVED
 
 | Item | Value | Verified |
 |------|-------|----------|
-| FC firmware version (from Configurator / CLI `version`) | **UNKNOWN — user must supply** | ❌ |
-| Submodule tag in `third_party/betaflight` | not yet added | ❌ |
-| Target name | `SPEEDYBEEF405V4` | ❌ |
+| FC firmware version | **Betaflight 4.5.1** (Jul 27 2024, commit `77d01ba3b`) | ✅ `config/diff_all.txt` header |
+| MSP API | 1.46 | ✅ same header |
+| Target name | `SPEEDYBEEF405V4` (STM32F405, `SPBE`) | ✅ `board_name` in `config/dump_all.txt` |
+| Submodule tag in `third_party/betaflight` | `4.5.1` — **not yet added** | ❌ |
 
-`config/quad.yaml: firmware.betaflight_version` is `null` until this is known.
-Phase 2 cannot start without it — SITL must match the firmware the real quad
-flies, or the tune under test is not the tune on the quad.
+`config/quad.yaml: firmware.betaflight_version` is now pinned to `4.5.1`, and a
+test asserts that version actually appears in the dump headers so the pin
+cannot drift from the hardware.
+
+**Read every interface detail below at tag `4.5.1`, not at master.** Ports and
+packet layouts have changed between releases.
+
+A fuller read of the two CLI dumps — mixer, ESC protocol, filters, tune, rates,
+modes, battery, logging — is in [`fc_config.md`](fc_config.md).
 
 ## 2. Transport and ports
 
@@ -70,6 +77,14 @@ These are the ones that silently produce a plausible-but-wrong sim:
       ordering or expects us to. This is the mapping flagged
       `verified: false` in `config/quad.yaml: motors.betaflight_order`.
 - [ ] **RC channel order and range** — AETR vs TAER, 1000–2000 vs something else.
+- [ ] **Gyro alignment.** The real FC has `gyro_1_sensor_align = CW90`, i.e. the
+      IMU is mounted rotated and Betaflight rotates it internally. Determine
+      whether SITL applies board/sensor alignment to the gyro it receives, or
+      expects data already in FC frame, and whether a SITL build even reads
+      that setting. Getting this wrong swaps roll and pitch.
+- [ ] **Motor idle.** The FC runs `dshot_idle_value = 550` (5.5%). Check
+      whether SITL's motor output already includes the idle offset or whether
+      the physics side must apply it.
 - [ ] **Time** — does SITL free-run, or does it step when we send a packet? This
       decides whether the project's "faster than real time, deterministic
       replay" requirement is achievable, and how.

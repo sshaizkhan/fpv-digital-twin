@@ -219,13 +219,53 @@ TEST(QuadConfig, MissingFileIsAnError) {
   EXPECT_THROW(fdt::loadQuadConfig(repoPath("config/does_not_exist.yaml")), fdt::ConfigError);
 }
 
-TEST(QuadConfig, FirmwareVersionIsUnsetSoPhase2IsBlocked) {
-  // Not an error: Phase 0 ships without it. But it must be visibly absent
-  // rather than silently defaulted, so Phase 2 has something to check.
+TEST(QuadConfig, FirmwareIsPinnedToTheRealFlightControllersVersion) {
   const auto cfg = fdt::loadQuadConfig(repoPath("config/quad.yaml"));
-  EXPECT_FALSE(cfg.firmware.betaflight_version.has_value())
-      << "if this now has a value, wire up the submodule pin check";
+
+  ASSERT_TRUE(cfg.firmware.betaflight_version.has_value())
+      << "SITL must be built from the firmware the real quad actually flies";
+  ASSERT_TRUE(cfg.firmware.betaflight_git_tag.has_value())
+      << "the submodule needs a tag to pin to";
+  EXPECT_EQ(*cfg.firmware.betaflight_version, "4.5.1");
+  EXPECT_EQ(*cfg.firmware.betaflight_git_tag, *cfg.firmware.betaflight_version)
+      << "the pinned tag must be the version on the FC, not some other release";
   EXPECT_EQ(cfg.firmware.target, "SPEEDYBEEF405V4");
+}
+
+TEST(QuadConfig, FirmwareVersionMatchesTheDumpItCameFrom) {
+  // The version in quad.yaml is only as good as its evidence. Both CLI dumps
+  // must exist and must carry that exact version in their header, so the pin
+  // cannot silently drift away from the hardware.
+  const auto cfg = fdt::loadQuadConfig(repoPath("config/quad.yaml"));
+  ASSERT_TRUE(cfg.firmware.betaflight_version.has_value());
+
+  for (const std::string& rel : {cfg.firmware.diff_all, cfg.firmware.dump_all}) {
+    std::ifstream in(repoPath(rel));
+    ASSERT_TRUE(in.good()) << "missing FC dump: " << rel;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const std::string text = ss.str();
+
+    EXPECT_NE(text.find("# Betaflight / "), std::string::npos) << rel << " has no version header";
+    EXPECT_NE(text.find(*cfg.firmware.betaflight_version), std::string::npos)
+        << rel << " does not mention version " << *cfg.firmware.betaflight_version;
+    EXPECT_NE(text.find(cfg.firmware.target), std::string::npos)
+        << rel << " is not from target " << cfg.firmware.target;
+  }
+}
+
+TEST(QuadConfig, MotorPolesAreKnownAndUsableForRpmTelemetry) {
+  const auto cfg = fdt::loadQuadConfig(repoPath("config/quad.yaml"));
+  EXPECT_EQ(cfg.motors.model.poles.value, 14) << "set motor_poles = 14 in the FC dump";
+  EXPECT_TRUE(cfg.motors.model.poles.measured);
+  EXPECT_EQ(cfg.motors.model.poles.value % 2, 0);
+  EXPECT_FALSE(contains(cfg.unmeasured, "motors.model.poles"));
+}
+
+TEST(QuadConfig, OddMotorPoleCountIsAnError) {
+  const auto text = withSubstitution(shippedConfigText(), "      value: 14\n      units: count",
+                                     "      value: 13\n      units: count");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
 }
 
 // --- every config fault is a ConfigError, never a crash --------------------

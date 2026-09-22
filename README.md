@@ -17,7 +17,7 @@ macOS / Apple Silicon.
 |---|---|---|
 | 0 | Repo scaffold, CMake build, `quad.yaml` schema, README | ✅ done |
 | 1 | Physics core standalone, with unit tests | ✅ done |
-| 2 | Betaflight SITL builds and runs, loop closed, stable hover | blocked: firmware version unknown |
+| 2 | Betaflight SITL builds and runs, loop closed, stable hover | unblocked, not started |
 | 3 | Radio input live, Godot viewer, acro flight from FPV | not started |
 | 4 | Blackbox replay, sim-vs-real overlay, parameter fitting | not started |
 
@@ -175,11 +175,16 @@ source, not a specification.
 
 ## What is needed from the pilot
 
-Phase 2 is blocked until these exist:
+The FC config is in: `config/diff_all.txt` and `config/dump_all.txt` from a real
+**Betaflight 4.5.1** / `SPEEDYBEEF405V4`. What they settle — mixer, ESC
+protocol, filters, tune, rates, modes, battery, logging — is written up in
+[`docs/fc_config.md`](docs/fc_config.md). Re-capture both after any tune change.
 
-1. The Betaflight version on the real FC → `config/quad.yaml: firmware.betaflight_version`.
-2. `diff all` and `dump all` from the FC → `config/diff_all.txt`, `config/dump_all.txt`.
-
-Then, in rough order of how much they matter: all-up weight on a kitchen scale,
-the inertia tensor from CAD, and the motor positions. Full list and method in
+Still needed, in rough order of how much each one distorts the gyro match:
+all-up weight on a kitchen scale, the inertia tensor from CAD, and the motor
+positions. Full list and method in
 [`docs/parameters_to_measure.md`](docs/parameters_to_measure.md).
+
+One easy win: `dshot_bidir` is **on**, so RPM is already in your Blackbox logs.
+That means `load_factor`, `thrust_coeff` and `time_constant` can be fitted from
+a real flight in Phase 4 without a thrust stand.
