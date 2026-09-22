@@ -1,6 +1,6 @@
 # What to measure, and how
 
-`config/quad.yaml` currently ships **40 unmeasured parameters**. They are all
+`config/quad.yaml` currently ships **41 unmeasured parameters**. They are all
 plausible for a 5" quad, and all of them are guesses. Run:
 
 ```sh
@@ -56,6 +56,7 @@ is actually trying to match: the gyro response to a stick input.
 | `camera.fov_horizontal` | Camera horizontal FOV | Camera spec sheet. Degrees. |
 | `camera.position` | Lens position from the CG | Calipers. Affects the apparent rotation centre in the FPV view, which is a real part of how a quad feels. |
 | `ground.stand_height` | CG height above ground when parked | Sit the quad on a table and measure up to the CG. |
+| `motors.model.poles` | Magnet pole count (14 assumed) | The FC is set to 14, but that is Betaflight's default and absent from `diff all`, so it proves nothing about the motor. Count the magnets in one bell (a 2807 should be 12N14P), or cross-check: hold a known throttle, read eRPM from a Blackbox log, and see whether `eRPM / 7` lands near `kv · V_pack · load_factor`. A wrong count is a constant scale error on every RPM the Phase 4 fitter sees. |
 | `motors.model.resistance` | Motor phase resistance | Milliohm meter, or leave for the fitter. |
 | `motors.spin` + `motors.betaflight_order` | Prop directions and BF motor numbering | Configurator motor tab: spin each motor one at a time and write down which one moves and which way. Also check `yaw_motors_reversed` in `diff_all.txt`. Set `verified: true` once done. |
 

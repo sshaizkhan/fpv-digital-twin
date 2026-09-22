@@ -85,6 +85,11 @@ These are the ones that silently produce a plausible-but-wrong sim:
 - [ ] **Motor idle.** The FC runs `dshot_idle_value = 550` (5.5%). Check
       whether SITL's motor output already includes the idle offset or whether
       the physics side must apply it.
+- [ ] **AIRMODE is ON** (a 4.5 default, so it does not appear in `diff all` --
+      see [`fc_config.md`](fc_config.md)). Betaflight keeps full PID authority
+      at zero throttle and raises motors above idle to hold attitude rather
+      than cutting them. Confirm SITL comes up with airmode enabled, and do not
+      expect motors to drop to idle at low stick.
 - [ ] **Time** — does SITL free-run, or does it step when we send a packet? This
       decides whether the project's "faster than real time, deterministic
       replay" requirement is achievable, and how.
@@ -102,6 +107,10 @@ index swap:
    motor produces thrust and the expected roll/pitch/yaw torque signs follow.
 5. RC channel mapping: full-right roll stick lands in the channel Betaflight
    reads as roll, at the right end of the range.
+6. Hover/arming motor outputs: with AIRMODE on, assert that at low throttle the
+   motors sit **above** idle and still respond to attitude error. Writing this
+   test expecting motors at idle will produce a mismatch that looks like a
+   physics bug and is not one.
 
 ## 6. macOS build
 

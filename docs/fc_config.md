@@ -37,7 +37,7 @@ headers, so the pin cannot drift away from the hardware.
 | `motor_pwm_protocol` | `DSHOT300` | |
 | `dshot_idle_value` | `550` | 5.5% idle. Betaflight never commands below this when armed, so the motor model's usable command range starts here, not at 0. |
 | `dshot_bidir` | `ON` | **Bidirectional DSHOT is on.** |
-| `motor_poles` | `14` | Now in `quad.yaml` as `motors.model.poles`, `measured: true`. |
+| `motor_poles` | `14` | In `quad.yaml` as `motors.model.poles`, `measured: false` — this is the Betaflight default (absent from `diff all`), so it shows only that it was never changed, not that it matches the motor. |
 
 ### Why `dshot_bidir = ON` is the best news in these files
 
@@ -49,7 +49,9 @@ RPM telemetry is being logged. That means **`load_factor`, `thrust_coeff` and
 - `thrust_coeff` — at a steady hover, `4 * kT * omega^2 = m*g`, and omega is logged.
 - `time_constant` — fit the first-order lag to a throttle step.
 
-Mechanical RPM is `eRPM / (poles / 2)` = `eRPM / 7`.
+Mechanical RPM is `eRPM / (poles / 2)` = `eRPM / 7`, **assuming 14 poles** — see
+the `motor_poles` row above. Confirm the pole count before trusting any
+RPM-derived fit, because an error here scales every logged RPM by a constant.
 
 ## Gyro, filtering and loop rate
 
@@ -60,7 +62,8 @@ Mechanical RPM is `eRPM / (poles / 2)` = `eRPM / 7`.
 | `gyro_lpf2` | PT1, 500 Hz |
 | `gyro_notch1/2` | off |
 | `dyn_notch_count` / `dyn_notch_q` | 1 / 500 |
-| `dterm_lpf1` / `dterm_lpf2` | 75 Hz / 150 Hz |
+| `dterm_lpf1` | PT1, dynamic 75–150 Hz, expo 5 |
+| `dterm_lpf2` | PT1, 150 Hz |
 | `pid_process_denom` | `2` (PID loop runs at half the gyro rate) |
 | `gyro_1_sensor_align` | `CW90` (`align_yaw = 900`) |
 
@@ -134,5 +137,31 @@ a quarter of the PID loop rate.
 
 ## Features
 
-`TELEMETRY`, `LED_STRIP`, `OSD`, `ESC_SENSOR`. `acc_calibration 55,161,8,1`
-(the accelerometer trim already applied on the real FC).
+`diff all` lists only four (`TELEMETRY`, `LED_STRIP`, `OSD`, `ESC_SENSOR`)
+because the rest are 4.5 defaults. The resolved state from
+`config/dump_all.txt` is what the firmware actually runs:
+
+| Feature | In `diff all`? | Note |
+|---|---|---|
+| `RX_SERIAL` | no (default) | Serial receiver; `serialrx_provider = CRSF`, `serialrx_inverted = OFF` (`dump_all.txt:599`). CRSF is the protocol — the dumps do not say which link hardware. |
+| `TELEMETRY` | yes | |
+| `LED_STRIP` | yes | |
+| `OSD` | yes | |
+| `AIRMODE` | no (default) | **On.** See below. |
+| `ESC_SENSOR` | yes | |
+| `ANTI_GRAVITY` | no (default) | **On.** I-term boost on fast throttle moves. |
+
+**`AIRMODE` being on changes what Phase 2 should expect.** With airmode,
+Betaflight keeps full PID authority at zero throttle and will raise motors
+above idle to hold attitude, instead of cutting them. A scripted-hover or
+arming comparison that assumes motors go to idle at low stick will see a
+mismatch that looks like a physics bug but is not one.
+
+**`ANTI_GRAVITY` matters for Phase 4 overlays.** It boosts I-term during fast
+throttle changes, so a sim run with a plain PID chain will diverge from the
+real gyro trace specifically on throttle punches. SITL runs the real firmware,
+so it gets this for free — but the fitter must not be handed throttle-step
+segments as if they were clean first-order responses.
+
+`acc_calibration 55,161,8,1` (the accelerometer trim already applied on the
+real FC).

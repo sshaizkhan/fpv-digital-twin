@@ -138,10 +138,19 @@ motors:
     poles:
       # Magnet poles. DSHOT telemetry reports eRPM; mechanical RPM is
       # eRPM / (poles / 2). Phase 4 needs this to read RPM out of a log.
+      #
+      # NOT confirmed against the motor. 14 is Betaflight's default: it appears
+      # in dump_all.txt but NOT in diff_all.txt, and `diff all` prints only
+      # non-default settings, so the dump shows only that it was never changed.
+      # A 12N14P stator (which an ECO II 2807 should be) gives 14, but until
+      # someone counts the magnets or the ESC telemetry RPM is cross-checked
+      # against a known throttle, this is an assumption. A wrong pole count is
+      # a constant scale error on every logged RPM, which the Phase 4 fitter
+      # will silently absorb into thrust_coeff and the drag terms.
       value: 14
       units: count
-      measured: true
-      source: "set motor_poles = 14 in config/dump_all.txt"
+      measured: false
+      source: "Betaflight default (set motor_poles = 14, absent from diff all); not confirmed against the motor"
 
     thrust_coeff:
       # thrust [N] = kT * omega^2, omega in rad/s

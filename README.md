@@ -70,7 +70,7 @@ Presets: `default` (RelWithDebInfo + Ninja), `debug`, `release`
 `build/<preset>/`.
 
 Verified on macOS 15.1 / Apple Silicon with Apple clang 16 and CMake 4.2.3:
-**95/95 tests pass, clean at `-Wall -Wextra -Wpedantic -Wconversion -Werror`.**
+**125/125 tests pass, clean at `-Wall -Wextra -Wpedantic -Wconversion -Werror`.**
 
 ## Run what exists today
 
@@ -82,18 +82,17 @@ Inspect and validate the quad parameters:
 
 ```
 quad: custom 3D-printed 5in X  (schema v1, frames FRD_NED)
-firmware: betaflight UNSET target SPEEDYBEEF405V4
+firmware: betaflight 4.5.1 target SPEEDYBEEF405V4
 mass: 0.7200 kg   inertia diag [0.0018 0.0018 0.0034] kg m^2
 motors:
   FL  pos [ 0.0780 -0.0780  0.0000] m  spin CW (from above)
   ...
   betaflight index -> motor: 1=RR 2=FR 3=RL 4=FL [UNVERIFIED]
 
-39 parameter(s) are NOT measured:
+41 parameter(s) are NOT measured:
   - mass.auw
   ...
   ! motors.betaflight_order is unverified
-  ! firmware.betaflight_version is unset (blocks Phase 2)
 ```
 
 Other flags: `--list-unmeasured` (dotted paths only, for scripting) and

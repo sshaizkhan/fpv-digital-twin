@@ -46,6 +46,24 @@ bool contains(const std::vector<std::string>& v, const std::string& s) {
   return std::find(v.begin(), v.end(), s) != v.end();
 }
 
+/// True if `text` carries a Betaflight version header declaring exactly
+/// `version`.
+///
+/// Searching the whole file for the version string is not good enough: "4.5.1"
+/// occurs inside "4.5.10", and a `set` line elsewhere in the dump could carry
+/// the number too. So isolate the header line, then require the version to be
+/// space-delimited on both sides -- the header reads
+/// "# Betaflight / <target> <version> <date> / ...".
+bool dumpHeaderDeclaresVersion(const std::string& text, const std::string& version) {
+  const std::string marker = "# Betaflight / ";
+  const auto start = text.find(marker);
+  if (start == std::string::npos) return false;
+  const auto eol = text.find('\n', start);
+  const std::string header =
+      text.substr(start, eol == std::string::npos ? std::string::npos : eol - start);
+  return header.find(" " + version + " ") != std::string::npos;
+}
+
 constexpr double kDeg2Rad = M_PI / 180.0;
 
 }  // namespace
@@ -246,20 +264,51 @@ TEST(QuadConfig, FirmwareVersionMatchesTheDumpItCameFrom) {
     ss << in.rdbuf();
     const std::string text = ss.str();
 
-    EXPECT_NE(text.find("# Betaflight / "), std::string::npos) << rel << " has no version header";
-    EXPECT_NE(text.find(*cfg.firmware.betaflight_version), std::string::npos)
-        << rel << " does not mention version " << *cfg.firmware.betaflight_version;
+    ASSERT_NE(text.find("# Betaflight / "), std::string::npos) << rel << " has no version header";
+    EXPECT_TRUE(dumpHeaderDeclaresVersion(text, *cfg.firmware.betaflight_version))
+        << rel << " header does not declare version " << *cfg.firmware.betaflight_version;
+
     EXPECT_NE(text.find(cfg.firmware.target), std::string::npos)
         << rel << " is not from target " << cfg.firmware.target;
   }
 }
 
-TEST(QuadConfig, MotorPolesAreKnownAndUsableForRpmTelemetry) {
+TEST(QuadConfig, VersionHeaderMatchIsNotFooledByALongerPatchRelease) {
+  // The regression this guards: reflash the FC to 4.5.10, re-capture both
+  // dumps, leave quad.yaml pinned at 4.5.1. A whole-file find("4.5.1") hits
+  // inside "4.5.10", the drift check passes, and SITL gets built from firmware
+  // that is not on the quad -- the one thing the check exists to prevent.
+  const std::string v451 =
+      "# Betaflight / STM32F405 (S405) 4.5.1 Jul 27 2024 / 04:05:41 (77d01ba3b) MSP API: 1.46\n";
+  const std::string v4510 =
+      "# Betaflight / STM32F405 (S405) 4.5.10 Jan 02 2026 / 11:22:33 (deadbeef1) MSP API: 1.47\n";
+
+  EXPECT_TRUE(dumpHeaderDeclaresVersion(v451, "4.5.1"));
+  EXPECT_TRUE(dumpHeaderDeclaresVersion(v4510, "4.5.10"));
+
+  EXPECT_FALSE(dumpHeaderDeclaresVersion(v4510, "4.5.1")) << "4.5.1 must not match 4.5.10";
+  EXPECT_FALSE(dumpHeaderDeclaresVersion(v451, "4.5")) << "a prefix pin must not match either";
+  EXPECT_FALSE(dumpHeaderDeclaresVersion("nothing here\n", "4.5.1"));
+
+  // And the version must be in the HEADER, not merely somewhere in the file.
+  EXPECT_FALSE(dumpHeaderDeclaresVersion(
+      "# Betaflight / STM32F405 (S405) 4.6.0 Jan 02 2026 / 11:22:33 (c0ffee123) MSP API: 1.47\n"
+      "set some_setting = 4.5.1\n",
+      "4.5.1"))
+      << "a version mentioned in a set line is not evidence of the firmware version";
+}
+
+TEST(QuadConfig, MotorPolesAreUsableForRpmTelemetryButNotYetConfirmed) {
+  // 14 is what the firmware is configured for, so it is the right number to
+  // compute with. It is NOT measured: `set motor_poles = 14` is absent from
+  // `diff all`, which prints only non-default settings, so the dump shows only
+  // that nobody changed the default. It must therefore stay in the unmeasured
+  // report until the pole count is confirmed against the motor.
   const auto cfg = fdt::loadQuadConfig(repoPath("config/quad.yaml"));
   EXPECT_EQ(cfg.motors.model.poles.value, 14) << "set motor_poles = 14 in the FC dump";
-  EXPECT_TRUE(cfg.motors.model.poles.measured);
   EXPECT_EQ(cfg.motors.model.poles.value % 2, 0);
-  EXPECT_FALSE(contains(cfg.unmeasured, "motors.model.poles"));
+  EXPECT_FALSE(cfg.motors.model.poles.measured);
+  EXPECT_TRUE(contains(cfg.unmeasured, "motors.model.poles"));
 }
 
 TEST(QuadConfig, OddMotorPoleCountIsAnError) {
