@@ -49,6 +49,8 @@ if(FDT_BUILD_TESTS)
     tests/test_multirotor.cpp
     tests/test_sitl_packets.cpp
     tests/test_sitl_link.cpp
+    tests/test_msp_client.cpp
+    tests/test_axis_hit.cpp
   )
   target_link_libraries(fdt_physics_tests PRIVATE fdt_physics GTest::gtest_main fdt_warnings)
   target_compile_definitions(fdt_physics_tests PRIVATE FDT_REPO_ROOT="${FDT_REPO_ROOT}")
@@ -96,6 +98,28 @@ if(FDT_BUILD_TESTS)
   )
   set_tests_properties(fdt_sim.RejectsANonPositiveDuration PROPERTIES
     WILL_FAIL TRUE
+    LABELS physics
+  )
+
+  # fdt_sitl_probe validates --seconds BEFORE opening any socket, so these two
+  # run without a SITL. Matched on the message rather than the exit code,
+  # because a connection failure also exits non-zero and would mask a
+  # regression here. `--seconds abc` used to escape main() and abort via
+  # std::terminate; `--seconds 0` used to run no loop iterations and then blame
+  # the user's container networking for an empty motor-packet count.
+  add_test(NAME fdt_sitl_probe.RejectsANonNumericSeconds
+    COMMAND fdt_sitl_probe --seconds abc
+  )
+  set_tests_properties(fdt_sitl_probe.RejectsANonNumericSeconds PROPERTIES
+    PASS_REGULAR_EXPRESSION "not a number: abc"
+    LABELS physics
+  )
+
+  add_test(NAME fdt_sitl_probe.RejectsANonPositiveSeconds
+    COMMAND fdt_sitl_probe --seconds 0
+  )
+  set_tests_properties(fdt_sitl_probe.RejectsANonPositiveSeconds PROPERTIES
+    PASS_REGULAR_EXPRESSION "--seconds must be a positive"
     LABELS physics
   )
 endif()

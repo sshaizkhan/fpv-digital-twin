@@ -17,6 +17,7 @@
 // be turned into a conversion plus a test. See docs/sitl_interface.md
 // section 5.
 
+#include "fdt/axis_hit.hpp"
 #include "fdt/msp_client.hpp"
 #include "fdt/sitl_link.hpp"
 
@@ -33,23 +34,43 @@
 namespace {
 
 using namespace std::chrono_literals;
+using fdt::probe::interpret;
 using fdt::sitl::FdmPacket;
 using fdt::sitl::RcPacket;
 using fdt::sitl::ServoPacket;
 
 constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+constexpr double kG = 9.80665;
 
-/// A level, stationary quad sitting at the origin.
-FdmPacket levelState(double t) {
+FdmPacket baseState(double t) {
   FdmPacket p{};
   p.timestamp = t;
   p.imu_orientation_quat[0] = 1.0;  // w, identity
-  // Level and at rest, an accelerometer reads 1 g. Which sign SITL wants is
-  // precisely what this tool is here to find out, so start at zero and let
-  // the sweep answer it.
   p.pressure = 101325.0;
   return p;
 }
+
+/// A level, stationary quad sitting at the origin.
+///
+/// An accelerometer at rest reads 1 g, so this sends it. The sign is not an
+/// open question: SITL negates all three accel axes (sitl.c:136-138, VERIFIED
+/// in docs/sitl_interface.md 4.4), so -kG on fdm Z arrives as about +256 counts
+/// on Betaflight Z. Sending a physically impossible 0 g instead used to make
+/// the "acc at rest" readback indistinguishable from no accelerometer data
+/// arriving at all -- which destroyed the one cheap liveness signal available
+/// at exactly the point where the gyro is suspected of being dead.
+FdmPacket levelState(double t) {
+  FdmPacket p = baseState(t);
+  p.imu_linear_acceleration_xyz[2] = -kG;
+  return p;
+}
+
+/// Level, but in free fall: a zero accel baseline.
+///
+/// Only the accelerometer sweep uses this, and only because it needs exactly
+/// one accel axis excited per step. Against `levelState` the resting 1 g on Z
+/// would light up a second axis on every step and trip the multi-axis guard.
+FdmPacket zeroAccelState(double t) { return baseState(t); }
 
 /// Mid-sticks, throttle low, AUX all low.
 RcPacket neutralRc(double t) {
@@ -61,23 +82,13 @@ RcPacket neutralRc(double t) {
   return p;
 }
 
-const char* axisName(int i) { return i == 0 ? "X" : (i == 1 ? "Y" : "Z"); }
-
-/// Betaflight only updates gyro.gyroADC once gyro calibration completes
-/// (gyro.c:417), and calibration consumes
-/// `gyro_calib_duration * 10000 / sampleLooptime` SAMPLES (gyro.c:164-167) --
-/// between 1250 and 10000 of them. Crucially, SITL's virtual gyro only yields
-/// a sample when we push one (virtualGyroRead returns false until dataReady,
-/// accgyro_virtual.c:67-82), so those samples come from OUR packets and
-/// nowhere else. Until enough have been sent the gyro reads a flat zero, which
-/// looks exactly like a broken axis mapping.
-///
-/// The accelerometer has no such gate, which is why it responds immediately.
 /// Betaflight's tasks run on REAL wall-clock time here -- SIMULATOR_GYROPID_SYNC
 /// is commented out (target.h:50-53), so SITL free-runs its scheduler. Flooding
-/// packets faster than real time therefore does NOT deliver more gyro samples;
-/// the later packets simply overwrite the buffer before the gyro task reads it.
-/// Every stream below is paced in real time for that reason.
+/// packets faster than real time therefore does NOT deliver more sensor samples;
+/// the later packets simply overwrite the buffer before the gyro task reads it
+/// (virtualGyroRead clears dataReady on each successful read,
+/// accgyro_virtual.c:67-82). Every stream below is paced in real time for that
+/// reason.
 void stream(fdt::sitl::SitlLink& link, const FdmPacket& base, double& clock,
             std::chrono::milliseconds duration) {
   const auto until = std::chrono::steady_clock::now() + duration;
@@ -110,18 +121,66 @@ SweepResult holdAndRead(fdt::sitl::SitlLink& link, fdt::msp::MspClient& msp, con
   return {imu.gyro, imu.acc};
 }
 
-/// Stream a level, stationary state until Betaflight finishes calibrating.
-/// Betaflight freezes gyro.gyroADC at zero until then (gyro.c:417), and the
-/// samples can only come from our packets (accgyro_virtual.c:67-82), so this
-/// has to be driven, not waited out.
-bool waitForGyroCalibration(fdt::sitl::SitlLink& link, fdt::msp::MspClient& msp, double& clock,
-                            std::chrono::seconds limit) {
+/// Stream a level, stationary state until ARMING_DISABLED_CALIBRATING clears.
+///
+/// Note what this does and does NOT wait for. `isCalibrating` (fc/core.c:183-195)
+/// ORs the gyro, ACC, BARO and MAG states and SITL compiles all four in
+/// (target.h:72-82), but on a fresh boot only the BARO is ever calibrating:
+///
+///   - GYRO: `gyroSetCalibrationCycles` forces `cyclesRemaining = 0` for
+///     GYRO_VIRTUAL (gyro.c:174-182) and `isGyroSensorCalibrationComplete` is
+///     just `cyclesRemaining == 0`, so the virtual gyro is complete from boot
+///     and `performGyroCalibration` is never reached at all.
+///   - ACC: `init.c:821-824` calls `accStartCalibration` at boot only when the
+///     mixer is MIXER_GIMBAL. `calibratingA` therefore stays 0 on a quad.
+///   - MAG: only started by a stick command or MSP_MAG_CALIBRATION.
+///   - BARO: `baroStartCalibration` runs unconditionally (`init.c:827-829`).
+///
+/// So this is a baro wait on our `pressure` field, and a failure here says
+/// nothing whatsoever about the gyro.
+bool waitForSensorCalibration(fdt::sitl::SitlLink& link, fdt::msp::MspClient& msp, double& clock,
+                              std::chrono::seconds limit) {
   const auto deadline = std::chrono::steady_clock::now() + limit;
   while (std::chrono::steady_clock::now() < deadline) {
     stream(link, levelState(clock), clock, 250ms);
     if (!msp.isCalibrating()) return true;
   }
   return false;
+}
+
+/// Parse a positive number of seconds, or report why not.
+bool parseSeconds(const std::string& text, double& out, std::string& error) {
+  try {
+    size_t end = 0;
+    const double value = std::stod(text, &end);
+    if (end != text.size()) {
+      error = "not a number: " + text;
+      return false;
+    }
+    if (!std::isfinite(value) || value <= 0.0) {
+      error = "--seconds must be a positive, finite number of seconds, got: " + text;
+      return false;
+    }
+    out = value;
+    return true;
+  } catch (const std::exception&) {
+    error = "not a number: " + text;
+    return false;
+  }
+}
+
+std::string motorOrderLine() {
+  // Print this from the mapping the code actually uses, both sides 0-based, so
+  // the line cannot drift from `betaflightMotorForPacketSlot`. It previously
+  // read "0->2, 1->3, 2->4, 3->1", mixing 0-based slots with 1-based motor
+  // numbers, which reads as a flat contradiction of the table against the one
+  // convention most likely to be silently wrong.
+  std::string line = "(packet slot -> BF motor index, both 0-based: ";
+  for (size_t slot = 0; slot < 4; ++slot) {
+    if (slot > 0) line += ", ";
+    line += std::to_string(slot) + "->" + std::to_string(fdt::sitl::betaflightMotorForPacketSlot(slot));
+  }
+  return line + ", per sitl.c:592-595)";
 }
 
 }  // namespace
@@ -133,10 +192,22 @@ int main(int argc, char** argv) {
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
-    if (a == "--host" && i + 1 < argc) host = argv[++i];
-    else if (a == "--seconds" && i + 1 < argc) seconds = std::stod(argv[++i]);
-    else if (a == "--quiet") quiet = true;
-    else if (a == "-h" || a == "--help") {
+    if (a == "--host" && i + 1 < argc) {
+      host = argv[++i];
+    } else if (a == "--seconds" && i + 1 < argc) {
+      // Parsed here, with validation, rather than letting std::stod throw from
+      // outside the try below -- that escaped main() and aborted via
+      // std::terminate. A non-positive value was worse than a crash: the loop
+      // below never ran, motor_packets stayed 0, and the probe blamed the
+      // container's networking for a bad command line.
+      std::string error;
+      if (!parseSeconds(argv[++i], seconds, error)) {
+        std::cerr << error << "\n";
+        return 2;
+      }
+    } else if (a == "--quiet") {
+      quiet = true;
+    } else if (a == "-h" || a == "--help") {
       std::cout << "usage: fdt_sitl_probe [--host IP] [--seconds N] [--quiet]\n";
       return 0;
     } else {
@@ -182,7 +253,7 @@ int main(int argc, char** argv) {
     }
     std::cout << "last motor_speed       : [" << motors.motor_speed[0] << ", " << motors.motor_speed[1]
               << ", " << motors.motor_speed[2] << ", " << motors.motor_speed[3] << "]\n";
-    std::cout << "(packet slot -> BF motor: 0->2, 1->3, 2->4, 3->1, per sitl.c:592-595)\n";
+    std::cout << motorOrderLine() << "\n";
     if (motor_packets < 10) {
       std::cout << "NOTE: barely any motor packets. Expected while motor_pwm_protocol is\n"
                    "      unset -- SITL defaults it to DISABLED because USE_DSHOT is not\n"
@@ -193,12 +264,15 @@ int main(int argc, char** argv) {
 
     if (quiet) return 0;
 
-    // --- gyro calibration warm-up -----------------------------------------
-    std::cout << "--- waiting for gyro calibration (streaming a level, still state) ---\n";
+    // --- sensor calibration warm-up ---------------------------------------
+    std::cout << "--- waiting for baro calibration (streaming a level, still state) ---\n";
     const auto cal_start = std::chrono::steady_clock::now();
-    if (!waitForGyroCalibration(link, msp, clock, 60s)) {
+    if (!waitForSensorCalibration(link, msp, clock, 60s)) {
       std::cerr << "FAIL: Betaflight is still reporting ARMING_DISABLED_CALIBRATING.\n"
-                   "  Every gyro reading below would be a frozen zero, so stopping here.\n";
+                   "  On a fresh boot that flag is the BARO -- NOT the gyro, which is\n"
+                   "  calibration-complete from boot under GYRO_VIRTUAL (gyro.c:174-182).\n"
+                   "  So this is a baro problem: check the `pressure` field in the state\n"
+                   "  packet. It says nothing about the gyro.\n";
       return 1;
     }
     const auto cal_secs =
@@ -208,7 +282,16 @@ int main(int argc, char** argv) {
       const fdt::msp::RawImu imu = msp.rawImu();
       std::cout << "gyro at rest: [" << imu.gyro[0] << ", " << imu.gyro[1] << ", " << imu.gyro[2]
                 << "]   acc at rest: [" << imu.acc[0] << ", " << imu.acc[1] << ", " << imu.acc[2]
-                << "]\n\n";
+                << "]\n";
+      // Sending -1 g on fdm Z, negated by SITL, should land as about +256 on
+      // Betaflight Z. If it does, IMU packets are reaching the sensors and a
+      // flat gyro is specific to the gyro path rather than to the transport.
+      if (std::abs(static_cast<int>(imu.acc[2])) < 100) {
+        std::cout << "WARNING: acc Z is near zero although the state packet carries -1 g.\n"
+                     "         IMU packets may not be reaching Betaflight at all -- fix that\n"
+                     "         before reading anything into the sweeps below.\n";
+      }
+      std::cout << "\n";
     }
 
     // --- 3. gyro axis sweep ------------------------------------------------
@@ -220,51 +303,37 @@ int main(int argc, char** argv) {
               << "   interpretation\n";
 
     for (int axis = 0; axis < 3; ++axis) {
+      // Settle at rest first so a residual from the previous step cannot be
+      // read as a second responding axis.
+      holdAndRead(link, msp, levelState(clock), clock);
+
       FdmPacket p = levelState(clock);
       p.imu_angular_velocity_rpy[axis] = 1.0;
       const SweepResult r = holdAndRead(link, msp, p, clock);
 
-      int hit = -1;
-      for (int i = 0; i < 3; ++i) {
-        if (std::abs(r.gyro[static_cast<size_t>(i)]) > 300) hit = i;
-      }
-      std::string note = "NO RESPONSE";
-      if (hit >= 0) {
-        const int16_t v = r.gyro[static_cast<size_t>(hit)];
-        note = std::string("fdm ") + axisName(axis) + " -> BF " + axisName(hit) + (v > 0 ? " (same sign)" : " (NEGATED)");
-      }
       std::cout << std::setw(12) << (std::string("rpy[") + std::to_string(axis) + "]")
                 << std::setw(8) << r.gyro[0] << std::setw(8) << r.gyro[1] << std::setw(8) << r.gyro[2]
-                << "   " << note << "\n";
+                << "   " << interpret(axis, r.gyro, 300) << "\n";
     }
-
-    // Back to rest so the next sweep is clean.
-    holdAndRead(link, msp, levelState(clock), clock);
 
     // --- 4. accelerometer sweep -------------------------------------------
     // ACC_SCALE = 256/9.80665, so 9.80665 m/s^2 should read about 256 counts.
-    std::cout << "\n--- accel: 9.80665 m/s^2 on one fdm axis at a time ---\n";
+    // Baselined on free fall, not on levelState, so exactly one axis moves.
+    std::cout << "\n--- accel: 9.80665 m/s^2 on one fdm axis at a time (free-fall baseline) ---\n";
     std::cout << "expect |256| counts (1 g = 256)\n";
     std::cout << std::setw(12) << "fdm axis" << std::setw(26) << "betaflight acc[X,Y,Z]"
               << "   interpretation\n";
 
     for (int axis = 0; axis < 3; ++axis) {
-      FdmPacket p = levelState(clock);
-      p.imu_linear_acceleration_xyz[axis] = 9.80665;
+      holdAndRead(link, msp, zeroAccelState(clock), clock);
+
+      FdmPacket p = zeroAccelState(clock);
+      p.imu_linear_acceleration_xyz[axis] = kG;
       const SweepResult r = holdAndRead(link, msp, p, clock);
 
-      int hit = -1;
-      for (int i = 0; i < 3; ++i) {
-        if (std::abs(r.acc[static_cast<size_t>(i)]) > 100) hit = i;
-      }
-      std::string note = "NO RESPONSE";
-      if (hit >= 0) {
-        const int16_t v = r.acc[static_cast<size_t>(hit)];
-        note = std::string("fdm ") + axisName(axis) + " -> BF " + axisName(hit) + (v > 0 ? " (same sign)" : " (NEGATED)");
-      }
       std::cout << std::setw(12) << (std::string("xyz[") + std::to_string(axis) + "]")
                 << std::setw(8) << r.acc[0] << std::setw(8) << r.acc[1] << std::setw(8) << r.acc[2]
-                << "   " << note << "\n";
+                << "   " << interpret(axis, r.acc, 100) << "\n";
     }
 
     // --- 5. attitude quaternion -------------------------------------------
@@ -284,6 +353,10 @@ int main(int argc, char** argv) {
         {"+30 deg about fdm z", 30.0 / kRadToDeg, 2},
     };
 
+    // USE_IMU_CALC is undefined for SITL (target.h:48), so the attitude comes
+    // straight from imuSetAttitudeQuat and the accel field does not feed into
+    // it. levelState's resting 1 g is therefore harmless here even though a
+    // genuinely tilted body would carry it on different axes.
     for (const auto& c : cases) {
       FdmPacket p = levelState(clock);
       const double half = c.angle_rad / 2.0;

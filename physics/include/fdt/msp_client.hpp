@@ -51,7 +51,25 @@ struct Reply {
 /// Parse one reply from `bytes`. Returns false if the buffer does not yet hold
 /// a complete frame; throws MspError if it holds a malformed or error one
 /// ('$','M','!' is Betaflight rejecting the command).
+///
+/// `consumed` is always set to the number of leading bytes the caller should
+/// discard -- on success the frame just parsed, and on a throw the bytes being
+/// rejected (a whole bad frame, or everything up to the next '$' when the
+/// header itself is garbage). It is only left at zero when the function
+/// returns false, i.e. when more data is needed and nothing may be dropped.
+/// A caller that ignores it on the throwing paths will re-parse the same bad
+/// bytes on every subsequent call and never recover.
 bool decodeReply(const std::vector<uint8_t>& bytes, Reply& out, size_t& consumed);
+
+/// ARMING_DISABLED_CALIBRATING (runtime_config.h:55).
+constexpr uint32_t kArmingDisabledCalibrating = 1u << 12;
+
+/// Pull the arming-disable bitfield out of an MSP_STATUS payload. Split out
+/// from MspClient so the variable-length offset walk can be tested against
+/// byte-exact fixtures without a socket -- it is keyed to the payload layout
+/// of one firmware version and will break silently when the submodule pin
+/// moves.
+uint32_t armingDisableFlagsFromStatus(const std::vector<uint8_t>& payload);
 
 // --- typed views -----------------------------------------------------------
 
@@ -89,12 +107,21 @@ class MspClient {
   /// MSP_STATUS arming-disable bitfield (runtime_config.h).
   uint32_t armingDisableFlags();
 
-  /// ARMING_DISABLED_CALIBRATING. Betaflight freezes gyro.gyroADC at zero
-  /// until calibration finishes (gyro.c:417), so a gyro readback taken before
-  /// this clears is meaningless.
+  /// ARMING_DISABLED_CALIBRATING. `isCalibrating` (fc/core.c:183-195) ORs the
+  /// gyro, ACC, BARO and MAG states, but on a freshly booted SITL only the
+  /// BARO is ever actually calibrating:
+  ///   - gyro: `gyroSetCalibrationCycles` forces `cyclesRemaining = 0` for
+  ///     GYRO_VIRTUAL (gyro.c:174-182), so it is complete from boot;
+  ///   - acc: `accStartCalibration` runs at boot only for MIXER_GIMBAL
+  ///     (init.c:821-824), which a quad is not;
+  ///   - mag: only on a stick command or MSP_MAG_CALIBRATION.
+  /// So this waits on the baro, and it tells you nothing about the gyro.
   bool isCalibrating();
 
  private:
+  /// Drop `consumed` leading bytes, clamped to the buffer size.
+  void dropFromBuffer(size_t consumed);
+
   int fd_ = -1;
   std::chrono::milliseconds timeout_;
   std::vector<uint8_t> buffer_;

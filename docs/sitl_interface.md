@@ -251,20 +251,46 @@ the same packets responds correctly.
 
 Ruled out so far:
 
-- **Not calibration.** `MSP_STATUS` `ARMING_DISABLED_CALIBRATING` (bit 12)
-  clears after ~0.3 s of streaming, and the readings are taken afterwards.
-  This mattered: Betaflight freezes `gyro.gyroADC` at zero until calibration
-  completes (`gyro.c:417`), and the samples can only come from our packets
-  because `virtualGyroRead` returns false until `dataReady`
-  (`accgyro_virtual.c:67-82`).
+- **Not calibration — and calibration could never have been the cause.** The
+  virtual gyro is calibration-complete from boot: `gyroSetCalibrationCycles`
+  forces `calibration.cyclesRemaining = 0` when
+  `gyroDev.gyroHardware == GYRO_VIRTUAL` (`gyro.c:174-182`), and
+  `isGyroSensorCalibrationComplete` is just `cyclesRemaining == 0`, so
+  `performGyroCalibration` is never reached at all.
+
+  An earlier version of this bullet claimed Betaflight "freezes `gyro.gyroADC`
+  at zero until calibration completes" and that the calibration samples come
+  from our packets. **That was wrong** and it is recorded here because the
+  wrong reasoning was load-bearing: it made `ARMING_DISABLED_CALIBRATING` look
+  like a gyro gate. It is not one. `isCalibrating` (`fc/core.c:183-195`) ORs the
+  gyro, ACC, BARO and MAG states and SITL compiles all four in
+  (`target.h:72-82`), but on a fresh boot **only the baro is ever calibrating**:
+  `accStartCalibration` runs at boot only for `MIXER_GIMBAL`
+  (`init.c:821-824`), the mag calibrates only on a stick command or
+  MSP_MAG_CALIBRATION, and the gyro is complete from boot as above — leaving
+  `baroStartCalibration` (`init.c:827-829`) as the only one that actually runs.
+  The ~0.3 s we measure is the baro settling on our `pressure` field.
+  `test_msp_client.cpp` pins these source facts so this cannot silently rot.
 - **Not packet framing.** The same packets drive the accelerometer correctly.
 - **Not the scale.** `gyroRateDps` (`gyro_init.c:737-740`) divides the filtered
   dps back by `gyroDev.scale`, so MSP_RAW_IMU is in raw counts and 1 rad/s
   should read about 940.
+- **Not sample starvation on its own.** `gyroUpdateSensor` returns early when
+  `readFn` returns false (`gyro.c:383-386`), leaving `gyroDev.gyroADC` at its
+  previous value — and `gyroUpdate` then re-publishes that value to
+  `gyro.gyroADC` anyway, gated only on calibration completeness, which is
+  always true here (`gyro.c:412-421`). So a starved gyro would report a **stale
+  non-zero** reading, not a flat zero. A persistent zero means no non-zero
+  sample ever reached `gyroDev.gyroADC` in the first place.
 
-Next diagnostics to try: whether `gyro.gyroADCf` is being populated at all
-(MSP_DEBUG with `debug_mode = GYRO_RAW`), and whether the FILTER task runs when
-`readFn` keeps returning false at the gyro task rate.
+Next diagnostics to try, in order of what the above leaves standing:
+
+1. Whether `TASK_GYRO` / `gyroUpdate` runs at all under SITL's free-running
+   scheduler — a task that never fires explains a flat zero exactly.
+2. `gyroDev.gyroAlign` and `gyro.gyroToUse`: an alignment or sensor-selection
+   mismatch would zero or misroute the axes after the read succeeds.
+3. Whether `gyro.gyroADCf` is populated (MSP_DEBUG with
+   `debug_mode = GYRO_RAW`), to separate the read path from the filter path.
 
 **Until this is resolved there is no bridge.** The gyro is what Betaflight
 actually flies on.
