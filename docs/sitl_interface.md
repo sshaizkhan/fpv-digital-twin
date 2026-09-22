@@ -209,7 +209,77 @@ quaternion directly.** Consequences:
 `channelCount = 16` and `rxProvider = RX_PROVIDER_UDP`. Until then Betaflight
 has no receiver at all. **Send RC before expecting to arm.**
 
-## 5. Still UNVERIFIED — settle empirically against a running SITL
+## 5a. MEASURED against a running SITL
+
+`fdt_sitl_probe` streams known values into SITL and reads back what Betaflight
+actually received via MSP. Reproduce with `./tools/run_sitl.sh` then
+`./build/make/physics/fdt_sitl_probe`.
+
+### Accelerometer — MEASURED, matches the source
+
+Sending 9.80665 m/s² on one `imu_linear_acceleration_xyz` axis at a time:
+
+| fdm axis | Betaflight acc[X,Y,Z] | Result |
+|---|---|---|
+| `xyz[0]` | **-256**, 0, 0 | X → X, **negated** |
+| `xyz[1]` | 0, **-256**, 0 | Y → Y, **negated** |
+| `xyz[2]` | 0, 0, **-256** | Z → Z, **negated** |
+
+No axis swapping: identity mapping, all three negated, exactly as `sitl.c:136-138`
+says. 1 g = 256 counts confirmed (`ACC_SCALE`).
+
+### Attitude quaternion — MEASURED, pitch is inverted
+
+Sending a 30° rotation about one axis and reading MSP_ATTITUDE:
+
+| Sent | roll | pitch | yaw |
+|---|---|---|---|
+| identity | 0.0 | 0.0 | 0.0 |
+| +30° about fdm x | **+30.0** | 0.0 | 0.0 |
+| +30° about fdm y | 0.0 | **-30.0** | 0.0 |
+| +30° about fdm z | 0.0 | 0.0 | **+30.0** |
+
+Roll and yaw pass straight through; **pitch comes back negated**. Note the
+matching comment on the (uncompiled) Euler path at `sitl.c:175`: "yes! pitch
+was inverted!!" — `imuSetAttitudeQuat` evidently shares that handedness.
+
+### Gyro — UNRESOLVED, reads a flat zero
+
+Sending 1 rad/s (and 10 rad/s) on one `imu_angular_velocity_rpy` axis at a time
+produces `gyro[X,Y,Z] = 0, 0, 0` from MSP_RAW_IMU, while the accelerometer in
+the same packets responds correctly.
+
+Ruled out so far:
+
+- **Not calibration.** `MSP_STATUS` `ARMING_DISABLED_CALIBRATING` (bit 12)
+  clears after ~0.3 s of streaming, and the readings are taken afterwards.
+  This mattered: Betaflight freezes `gyro.gyroADC` at zero until calibration
+  completes (`gyro.c:417`), and the samples can only come from our packets
+  because `virtualGyroRead` returns false until `dataReady`
+  (`accgyro_virtual.c:67-82`).
+- **Not packet framing.** The same packets drive the accelerometer correctly.
+- **Not the scale.** `gyroRateDps` (`gyro_init.c:737-740`) divides the filtered
+  dps back by `gyroDev.scale`, so MSP_RAW_IMU is in raw counts and 1 rad/s
+  should read about 940.
+
+Next diagnostics to try: whether `gyro.gyroADCf` is being populated at all
+(MSP_DEBUG with `debug_mode = GYRO_RAW`), and whether the FILTER task runs when
+`readFn` keeps returning false at the gyro task rate.
+
+**Until this is resolved there is no bridge.** The gyro is what Betaflight
+actually flies on.
+
+### A timing fact worth keeping
+
+`SIMULATOR_GYROPID_SYNC` is commented out (`target.h:50-53`), so **Betaflight
+free-runs its scheduler on real wall-clock time**. Streaming packets faster
+than real time does NOT deliver proportionally more sensor samples — later
+packets simply overwrite the buffer before the gyro task reads it. An early
+version of the probe flooded 30000 packets in under a second and produced
+smeared, half-settled accelerometer readings for exactly this reason. Every
+sweep is now paced in real time.
+
+## 5b. Still UNVERIFIED — settle empirically against a running SITL
 
 These cannot be read off cleanly, and guessing them is how the sim ends up
 plausible but wrong. Each gets a test that fails on a sign or index swap.

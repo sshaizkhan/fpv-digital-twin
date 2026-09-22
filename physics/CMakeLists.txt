@@ -12,6 +12,7 @@ add_library(fdt_physics
   src/imu.cpp
   src/multirotor.cpp
   src/sitl_link.cpp
+  src/msp_client.cpp
 )
 
 target_include_directories(fdt_physics PUBLIC
@@ -32,6 +33,9 @@ target_link_libraries(fdt_config_dump PRIVATE fdt_physics fdt_warnings)
 
 add_executable(fdt_sim apps/sim_step.cpp)
 target_link_libraries(fdt_sim PRIVATE fdt_physics fdt_warnings)
+
+add_executable(fdt_sitl_probe apps/sitl_probe.cpp)
+target_link_libraries(fdt_sitl_probe PRIVATE fdt_physics fdt_warnings)
 
 # --- tests -----------------------------------------------------------------
 
