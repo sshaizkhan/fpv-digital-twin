@@ -17,8 +17,19 @@ constexpr double kTangentialRegularisation = 0.05;
 GroundModel::GroundModel(const Ground& config, const Motors& motors) : config_(config) {
   for (const auto id : kAllMotorIds) {
     const size_t i = static_cast<size_t>(id);
-    // Body +z is down, so the feet are at positive z relative to the CG.
-    contact_points_[i] = motors.at(id).position.value + Eigen::Vector3d(0.0, 0.0, config_.stand_height.value);
+    // Under each motor in x and y, `stand_height` below the CG in z. Body +z is
+    // down, so the feet are at positive z relative to the CG.
+    //
+    // The motor's OWN z is deliberately not added. `ground.stand_height` is
+    // defined as the height of the CG above the ground when the quad is parked
+    // (docs/parameters_to_measure.md, docs/physics_model.md), so the foot must
+    // sit exactly that far below the CG. Real motor mounts sit above the CG
+    // plane, so letting their z leak in here would silently change the parked
+    // CG height away from the number the user measured -- and would put
+    // Multirotor::placeOnGround() off by the same amount, spawning the quad in
+    // the air instead of settled on its feet.
+    const Eigen::Vector3d& mount = motors.at(id).position.value;
+    contact_points_[i] = Eigen::Vector3d(mount.x(), mount.y(), config_.stand_height.value);
   }
 }
 

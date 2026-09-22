@@ -1,5 +1,7 @@
 #include "fdt/multirotor.hpp"
 
+#include <cmath>
+
 namespace fdt {
 
 InertiaProperties inertiaFrom(const QuadConfig& config) {
@@ -13,7 +15,8 @@ Multirotor::Multirotor(const QuadConfig& config, uint64_t seed)
       battery_(config.battery),
       aero_(config.aero),
       ground_(config.ground, config.motors),
-      imu_(config.imu, seed) {
+      imu_(config.imu, seed),
+      imu_period_(1.0 / config.imu.sample_rate.value) {
   reset();
 }
 
@@ -23,6 +26,7 @@ void Multirotor::reset(const State& initial) {
   motors_.reset();
   battery_.reset();
   imu_.reset();
+  imu_accumulator_ = 0.0;
   telemetry_ = Telemetry{};
   motors_.setSupplyVoltage(battery_.terminalVoltage());
   refreshTelemetry();
@@ -79,12 +83,22 @@ void Multirotor::step(double dt) {
 
   const Wrench w = refreshTelemetry();
 
-  // The accelerometer measures specific force: every force EXCEPT gravity,
-  // per unit mass, in the body frame. Our wrench already excludes gravity
-  // (the integrator adds it in the world frame), so this is just F/m --
-  // identical to specificForceBody(state_, a_world) but without the round
-  // trip through the world frame in the hot loop.
-  telemetry_.imu = imu_.sample(state_.angular_velocity, w.force / inertia_.mass, dt);
+  // The IMU runs on its own clock, decimating the physics loop, so that a real
+  // gyro rate in quad.yaml means what it says: the noise sigma is
+  // density / sqrt(imu_period_), not density / sqrt(dt). Between ticks the
+  // previous sample is held, which is what Betaflight would read too.
+  imu_accumulator_ += dt;
+  if (imu_accumulator_ + imu_period_ * 1e-9 >= imu_period_) {
+    // The accelerometer measures specific force: every force EXCEPT gravity,
+    // per unit mass, in the body frame. Our wrench already excludes gravity
+    // (the integrator adds it in the world frame), so this is just F/m --
+    // identical to specificForceBody(state_, a_world) but without the round
+    // trip through the world frame in the hot loop.
+    telemetry_.imu = imu_.sample(state_.angular_velocity, w.force / inertia_.mass, imu_period_);
+    // Carry the remainder so the average rate is exact, and bound it with fmod
+    // so a caller stepping slower than the IMU period cannot build up a debt.
+    imu_accumulator_ = std::fmod(imu_accumulator_, imu_period_);
+  }
 }
 
 Wrench Multirotor::refreshTelemetry() {

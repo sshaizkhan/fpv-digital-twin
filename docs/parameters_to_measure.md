@@ -27,8 +27,9 @@ is actually trying to match: the gyro response to a stick input.
 | YAML path | What | How |
 |---|---|---|
 | `mass.auw` | All-up weight, flight-ready | Kitchen scale, with the flight battery, props, and everything you actually fly with. Grams → kg. |
+| `mass.inertia_products` | Ixy, Ixz, Iyz about the CG | Straight from the same CAD export. Zero is a fair assumption for a symmetric X frame. The loader checks the **full** tensor, not just the diagonal: its principal moments must all be positive and satisfy the triangle inequality, because a tensor that fails either describes no rigid body and inverting it would turn the whole sim into NaN. |
 | `mass.inertia_diag` | Ixx, Iyy, Izz about the CG | From CAD: assign the real densities, add point masses for motors (~47 g each), stack, battery, camera, VTX. Export the inertia tensor about the CG in the body frame. This is the single biggest driver of angular acceleration, so a CAD number beats a guess by a lot. |
-| `motors.geometry.*` | Motor XY positions from the CG | Measure motor-shaft to motor-shaft diagonals with calipers, halve them, and offset by the CG. Currently assumed as a symmetric 220 mm diagonal. Enter in **metres**, body FRD (+x fwd, +y right). |
+| `motors.geometry.*` | Motor positions from the CG | Measure motor-shaft to motor-shaft diagonals with calipers, halve them, and offset by the CG. Currently assumed as a symmetric 220 mm diagonal. Enter in **metres**, body FRD (+x fwd, +y right, +z **down**). z is the mount plane relative to the CG — usually negative, since the motors sit above the CG — and it feeds the thrust torque arm `r × F`. It does **not** move the landing feet: those come from `ground.stand_height`. |
 | `motors.model.thrust_coeff` | kT, thrust = kT·ω² | Thrust stand, or fit it in Phase 4 from a hover: at a steady hover, 4·kT·ω² = m·g, and the RPM is in the Blackbox log if bidirectional DSHOT telemetry is on. |
 | `motors.model.time_constant` | Motor spin-up lag | Fit in Phase 4 from a step input in a real log, or a thrust stand with a step command. This sets how much of your D-term behaviour the sim can reproduce. |
 | `motors.model.torque_coeff` | kQ, drag torque = kQ·ω² | Sets yaw authority almost entirely. Thrust stand with a torque cell, or fit against a real yaw step. |
@@ -44,7 +45,7 @@ is actually trying to match: the gyro response to a stick input.
 | `aero.angular_damping` | Aerodynamic rate damping | Fit from the tail of a real rate step. |
 | `battery.internal_resistance` | Pack DC IR | Fit from the sag in a real log: `V_sag / I` at a punch-out. Or a pack IR meter. |
 | `battery.ocv_curve` | Cell OCV vs SoC | Generic LiPo curve for now; a discharge test on the actual pack if the sag behaviour matters. |
-| `imu.sample_rate` | Gyro rate | Read off `diff_all.txt` — must match the real `gyro_hardware_lpf` / loop rate or the noise and delay will not match. |
+| `imu.sample_rate` | Gyro rate | Read off `diff_all.txt` — must match the real `gyro_hardware_lpf` / loop rate or the noise and delay will not match. The IMU decimates the physics loop, so `sim.physics_rate` must be a whole multiple of this; raise `sim.physics_rate` rather than lowering this to fit. |
 | `imu.gyro_noise_density`, `imu.accel_noise_density` | IMU noise floor | Fit from a **stationary, armed, motors-off** Blackbox log: take the PSD of the gyro trace. |
 
 ## Tier 3 — cosmetic or sim-only, but fix them before you judge the feel

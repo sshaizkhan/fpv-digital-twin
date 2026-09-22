@@ -72,6 +72,12 @@ class Multirotor {
   /// can assert on forces directly rather than inferring them from motion.
   Wrench wrench(const State& state, double t_offset) const;
 
+  /// The IMU's sample period, seconds -- `1 / imu.sample_rate`, NOT the physics
+  /// step. The gyro and accel are decimated to this rate and their noise sigma
+  /// is derived from it, so a real gyro rate in quad.yaml produces a real noise
+  /// floor. The loader guarantees `sim.physics_rate` is a whole multiple of it.
+  double imuPeriod() const { return imu_period_; }
+
  private:
   /// Refresh every telemetry field except the IMU sample, and hand back the
   /// body wrench it computed so step() can reuse it.
@@ -88,6 +94,9 @@ class Multirotor {
   State state_;
   Telemetry telemetry_;
   double time_ = 0.0;
+
+  double imu_period_ = 0.0;       ///< s, 1 / imu.sample_rate
+  double imu_accumulator_ = 0.0;  ///< s of physics time owed to the IMU
 };
 
 /// Mass and inertia from a config, ready for the integrator.

@@ -51,4 +51,44 @@ if(FDT_BUILD_TESTS)
     PROPERTIES LABELS physics
     DISCOVERY_MODE PRE_TEST
   )
+
+
+  # --- CLI behaviour ---------------------------------------------------------
+  # fdt_sim's step rate must come from sim.physics_rate in the config, not from
+  # a literal in main(). Pinned here because it is main() wiring, not library
+  # behaviour the gtest binary can reach. If sim.physics_rate in
+  # config/quad.yaml changes, this regex changes with it -- deliberately, so
+  # the coupling stays visible.
+  add_test(NAME fdt_sim.DefaultsToTheConfiguredPhysicsRate
+    COMMAND fdt_sim --config "${FDT_REPO_ROOT}/config/quad.yaml" --duration 0.01
+  )
+  set_tests_properties(fdt_sim.DefaultsToTheConfiguredPhysicsRate PROPERTIES
+    PASS_REGULAR_EXPRESSION "at 8000\\.000 Hz"
+    LABELS physics
+  )
+
+  add_test(NAME fdt_sim.ExplicitRateOverridesTheConfig
+    COMMAND fdt_sim --config "${FDT_REPO_ROOT}/config/quad.yaml" --duration 0.01 --rate 1000
+  )
+  set_tests_properties(fdt_sim.ExplicitRateOverridesTheConfig PROPERTIES
+    PASS_REGULAR_EXPRESSION "at 1000\\.000 Hz"
+    LABELS physics
+  )
+
+  # A rate of zero used to run nothing, print `inf us/step` and exit 0.
+  add_test(NAME fdt_sim.RejectsANonPositiveRate
+    COMMAND fdt_sim --config "${FDT_REPO_ROOT}/config/quad.yaml" --rate 0
+  )
+  set_tests_properties(fdt_sim.RejectsANonPositiveRate PROPERTIES
+    WILL_FAIL TRUE
+    LABELS physics
+  )
+
+  add_test(NAME fdt_sim.RejectsANonPositiveDuration
+    COMMAND fdt_sim --config "${FDT_REPO_ROOT}/config/quad.yaml" --duration 0
+  )
+  set_tests_properties(fdt_sim.RejectsANonPositiveDuration PROPERTIES
+    WILL_FAIL TRUE
+    LABELS physics
+  )
 endif()

@@ -322,7 +322,7 @@ ground:
     value: 8000.0
     units: N/m
     measured: false
-    source: "PLACEHOLDER: penalty contact, tuned for stability at 1 kHz not realism"
+    source: "PLACEHOLDER: penalty contact, tuned for stability at 1-8 kHz not realism"
 
   contact_damping:
     value: 60.0
@@ -369,10 +369,12 @@ camera:
 # ---------------------------------------------------------------------------
 sim:
   physics_rate:
-    value: 2000.0
+    # Must be a whole multiple of imu.sample_rate: the IMU decimates this loop,
+    # so the physics cannot run slower than the gyro it is synthesising.
+    value: 8000.0
     units: Hz
     measured: false
-    source: "sim setting, not a property of the quad"
+    source: "sim setting, not a property of the quad; matched to imu.sample_rate"
 
   viewer_rate:
     value: 120.0

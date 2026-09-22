@@ -111,7 +111,8 @@ TEST(Ground, ContactPointsSitUnderEachMotor) {
     const size_t i = static_cast<size_t>(id);
     EXPECT_NEAR(pts[i].x(), cfg.motors.at(id).position.value.x(), 1e-15);
     EXPECT_NEAR(pts[i].y(), cfg.motors.at(id).position.value.y(), 1e-15);
-    EXPECT_NEAR(pts[i].z(), cfg.motors.at(id).position.value.z() + cfg.ground.stand_height.value, 1e-15);
+    EXPECT_NEAR(pts[i].z(), cfg.ground.stand_height.value, 1e-15)
+        << "the foot is stand_height below the CG; the motor's own z must not enter";
     EXPECT_GT(pts[i].z(), 0.0) << "contact points are BELOW the CG, and +z is down";
   }
 }
@@ -220,4 +221,50 @@ TEST(Ground, StationaryQuadHasNoFriction) {
   const fdt::Wrench w = g.wrench(restingAt(cfg, 0.004));
   EXPECT_NEAR(w.force.x(), 0.0, 1e-12);
   EXPECT_NEAR(w.force.y(), 0.0, 1e-12);
+}
+
+// --- stand_height means what the docs say it means -------------------------
+//
+// docs/physics_model.md and docs/parameters_to_measure.md both define
+// `ground.stand_height` as the height of the CG above the ground when the quad
+// is parked, i.e. the feet sit exactly `stand_height` below the CG. Motor z
+// must not enter that: real motor mounts sit above the CG plane, and letting
+// their z leak into the contact point silently changes the parked CG height
+// away from the number the user measured.
+
+namespace {
+
+/// Shipped config with all four motors moved out of the CG plane, which is
+/// what a real measurement produces (mounts sit above the CG, so z is -ve).
+fdt::QuadConfig configWithMotorsAboveTheCg(double motor_z) {
+  fdt::QuadConfig cfg = config();
+  for (const auto id : fdt::kAllMotorIds) cfg.motors.at(id).position.value.z() = motor_z;
+  return cfg;
+}
+
+}  // namespace
+
+TEST(Ground, ContactPointsAreStandHeightBelowTheCgWhateverTheMotorZ) {
+  const auto cfg = configWithMotorsAboveTheCg(-0.015);
+  fdt::GroundModel g(cfg.ground, cfg.motors);
+
+  for (const auto id : fdt::kAllMotorIds) {
+    const auto& p = g.contactPoints()[static_cast<size_t>(id)];
+    EXPECT_NEAR(p.x(), cfg.motors.at(id).position.value.x(), 1e-15) << "feet stay under their motor in x";
+    EXPECT_NEAR(p.y(), cfg.motors.at(id).position.value.y(), 1e-15) << "feet stay under their motor in y";
+    EXPECT_NEAR(p.z(), cfg.ground.stand_height.value, 1e-15)
+        << "the foot is stand_height below the CG, not stand_height below the motor";
+  }
+}
+
+TEST(Ground, ParkedCgHeightEqualsStandHeightWhateverTheMotorZ) {
+  const auto cfg = configWithMotorsAboveTheCg(-0.015);
+  fdt::GroundModel g(cfg.ground, cfg.motors);
+
+  // Level, CG exactly stand_height above the surface: the feet must be just
+  // touching, so penetration is zero.
+  fdt::State s;
+  s.position.z() = cfg.ground.height.value - cfg.ground.stand_height.value;
+  EXPECT_NEAR(g.penetration(s), 0.0, 1e-15)
+      << "parked at the measured CG height, the feet must be exactly on the surface";
 }

@@ -227,3 +227,158 @@ TEST(QuadConfig, FirmwareVersionIsUnsetSoPhase2IsBlocked) {
       << "if this now has a value, wire up the submodule pin check";
   EXPECT_EQ(cfg.firmware.target, "SPEEDYBEEF405V4");
 }
+
+// --- every config fault is a ConfigError, never a crash --------------------
+//
+// The loader's contract (quad_config.hpp) is that ANYTHING wrong with the file
+// throws ConfigError. Both apps catch only ConfigError, so a yaml-cpp
+// exception escaping the parser aborts the process instead of printing a
+// diagnostic. These tests pin the type, not just the fact of failure.
+
+TEST(QuadConfig, NonNumericOcvVoltageIsAConfigErrorNotACrash) {
+  const auto text = withSubstitution(shippedConfigText(), "{soc: 0.50, v: 3.83}",
+                                     "{soc: 0.50, v: \"not-a-number\"}");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, NonNumericOcvSocIsAConfigErrorNotACrash) {
+  const auto text = withSubstitution(shippedConfigText(), "{soc: 0.50, v: 3.83}",
+                                     "{soc: \"half\", v: 3.83}");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, NonScalarSpinValueIsAConfigErrorNotACrash) {
+  const auto text = withSubstitution(shippedConfigText(), "    FL: CW", "    FL: [CW]");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, NonMappingSpinBlockIsAConfigErrorNotACrash) {
+  const auto text = withSubstitution(shippedConfigText(),
+                                     "    FL: CW\n    FR: CCW\n    RL: CCW\n    RR: CW\n",
+                                     "    - CW\n    - CCW\n    - CCW\n    - CW\n");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, NonScalarBetaflightOrderValueIsAConfigErrorNotACrash) {
+  const auto text = withSubstitution(shippedConfigText(), "    2: FR", "    2: [FR]");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, NonBooleanSitlVerifiedFlagIsAConfigErrorNotACrash) {
+  const auto text = withSubstitution(shippedConfigText(), "sitl_verified: false", "sitl_verified: perhaps");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, NonScalarOcvSourceIsAConfigErrorNotACrash) {
+  const auto text = withSubstitution(shippedConfigText(),
+                                     "    source: \"PLACEHOLDER: generic LiPo OCV curve\"",
+                                     "    source: {a: 1}");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+// --- the FULL inertia tensor must describe a real rigid body ---------------
+//
+// The diagonal triangle inequality is not enough: `inertia_products` feeds the
+// same tensor, and InertiaProperties inverts it unconditionally. A singular
+// tensor turns every subsequent state into NaN with no diagnostic; an
+// indefinite one is worse, because the sim keeps running and gains energy.
+
+TEST(QuadConfig, SingularInertiaTensorIsAnError) {
+  // Ixy = sqrt(Ixx*Iyy) makes the x-y block exactly singular.
+  const auto text = withSubstitution(shippedConfigText(),
+                                     "    value: [0.0, 0.0, 0.0]\n    units: kg*m^2",
+                                     "    value: [0.00175, 0.0, 0.0]\n    units: kg*m^2");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, IndefiniteInertiaTensorIsAnError) {
+  const auto text = withSubstitution(shippedConfigText(),
+                                     "    value: [0.0, 0.0, 0.0]\n    units: kg*m^2",
+                                     "    value: [0.01, 0.0, 0.0]\n    units: kg*m^2");
+  try {
+    fdt::parseQuadConfig(text, "<test>");
+    FAIL() << "an indefinite inertia tensor describes no rigid body and must be rejected";
+  } catch (const fdt::ConfigError& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("mass.inertia"), std::string::npos) << msg;
+  }
+}
+
+TEST(QuadConfig, PrincipalMomentsMustSatisfyTheTriangleInequality) {
+  // Ixx = Iyy = 1.75e-3, Izz = 3.36e-3, Ixy = 1.72e-3. The x-y block's
+  // eigenvalues are Ixx +/- Ixy = 3.47e-3 and 3.0e-5, so the principal moments
+  // are {3.0e-5, 3.36e-3, 3.47e-3}. That tensor is positive definite, and the
+  // raw DIAGONAL passes the triangle inequality (1.75 + 1.75 >= 3.36), but the
+  // principal moments do not: 3.0e-5 + 3.36e-3 = 3.39e-3 < 3.47e-3. Only a
+  // check that runs on the eigenvalues catches it.
+  const auto text = withSubstitution(shippedConfigText(),
+                                     "    value: [0.0, 0.0, 0.0]\n    units: kg*m^2",
+                                     "    value: [0.00172, 0.0, 0.0]\n    units: kg*m^2");
+  try {
+    fdt::parseQuadConfig(text, "<test>");
+    FAIL() << "principal moments violating the triangle inequality must be rejected";
+  } catch (const fdt::ConfigError& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("mass.inertia"), std::string::npos) << msg;
+  }
+}
+
+// --- the declared IMU rate must be reachable from the physics rate ---------
+
+TEST(QuadConfig, PhysicsRateMustBeAnIntegerMultipleOfTheImuRate) {
+  const auto cfg = fdt::loadQuadConfig(repoPath("config/quad.yaml"));
+  const double ratio = cfg.sim.physics_rate.value / cfg.imu.sample_rate.value;
+  EXPECT_GE(ratio, 1.0) << "physics cannot synthesise an IMU faster than itself";
+  EXPECT_NEAR(ratio, std::round(ratio), 1e-9) << "the IMU must decimate the physics loop by a whole number";
+}
+
+TEST(QuadConfig, ImuRateFasterThanPhysicsIsAnError) {
+  // Anchor on the key, not just the value: sim.physics_rate is 8000.0 too.
+  const auto text = withSubstitution(shippedConfigText(), "  sample_rate:\n    value: 8000.0",
+                                     "  sample_rate:\n    value: 32000.0");
+  try {
+    fdt::parseQuadConfig(text, "<test>");
+    FAIL() << "an IMU faster than the physics loop cannot be synthesised and must be rejected";
+  } catch (const fdt::ConfigError& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("sample_rate"), std::string::npos) << msg;
+  }
+}
+
+TEST(QuadConfig, NonIntegerImuDecimationIsAnError) {
+  const auto text = withSubstitution(shippedConfigText(), "  sample_rate:\n    value: 8000.0",
+                                     "  sample_rate:\n    value: 3000.0");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, ErrorMessagesReportSmallNumbersReadably) {
+  // Inertias are ~1e-3 and tolerances ~1e-19, so a message formatted with the
+  // default six-decimal fixed notation degenerates to "0.000000" and tells the
+  // reader nothing about the number that was rejected.
+  const auto text = withSubstitution(shippedConfigText(),
+                                     "    value: [0.0, 0.0, 0.0]\n    units: kg*m^2",
+                                     "    value: [0.00175, 0.0, 0.0]\n    units: kg*m^2");
+  try {
+    fdt::parseQuadConfig(text, "<test>");
+    FAIL() << "a singular inertia tensor must be rejected";
+  } catch (const fdt::ConfigError& e) {
+    const std::string msg = e.what();
+    EXPECT_EQ(msg.find("0.000000"), std::string::npos)
+        << "a rejected value must be legible, not rounded away to zero: " << msg;
+  }
+}
+
+TEST(QuadConfig, ErrorMessagesReportSmallPositiveThresholdsReadably) {
+  // -6e-10 is the interesting case: six-decimal fixed notation renders it as
+  // "-0.000000", so the message would name a path but not a usable value.
+  const auto text = withSubstitution(shippedConfigText(), "      value: 6.0e-6", "      value: -6.0e-10");
+  try {
+    fdt::parseQuadConfig(text, "<test>");
+    FAIL() << "a negative rotor inertia must be rejected";
+  } catch (const fdt::ConfigError& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("motors.model.rotor_inertia"), std::string::npos) << msg;
+    EXPECT_EQ(msg.find("-0.000000"), std::string::npos)
+        << "a rejected value must be legible, not rounded away to zero: " << msg;
+  }
+}

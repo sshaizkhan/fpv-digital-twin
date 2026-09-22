@@ -108,16 +108,21 @@ Fly it headless, with no Betaflight and no viewer:
 
 ```
 profile      : althold
-steps        : 20000 at 2000.0 Hz (10.0 s)
-wall clock   : 0.007 s  ->  1505.6x real time, 0.33 us/step
+steps        : 80000 at 8000.000 Hz (10.000 s)
+wall clock   : 0.386 s  ->  25.9x real time, 4.82 us/step
 hover cmd    : 34.603 %
-final alt    : 9.975 m
-battery      : 16.741 V, 1.791 A, soc 99.885 %
+final alt    : 9.971 m
+battery      : 16.728 V, 1.792 A, soc 99.617 %
 ```
+
+The step rate comes from `sim.physics_rate` in the config, which is the single
+source of truth; `--rate HZ` overrides it for a one-off. Note the `us/step`
+figure above is dominated by the CSV write (~4.4 us/row), not the physics: drop
+`--out` and the same run reports **0.34 us/step, ~364x real time** at 8 kHz.
 
 Profiles: `hover` (open loop, sinks slowly as the pack sags — that is correct),
 `althold` (a proportional altitude hold on top of it), `freefall`, `takeoff`,
-`rollstep`. `--out` writes a 29-column CSV trace: pose, quaternion, body rates,
+`rollstep`. `--out` writes a 30-column CSV trace: pose, quaternion, body rates,
 synthesised gyro and accel, per-motor RPM, thrust, pack voltage/current/SoC and
 the ground-contact flag.
 

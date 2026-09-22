@@ -2,6 +2,8 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <Eigen/Eigenvalues>
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -21,6 +23,15 @@ constexpr double kDeg2Rad = 3.14159265358979323846 / 180.0;
 
 std::string join(const std::string& base, const std::string& key) {
   return base.empty() ? key : base + "." + key;
+}
+
+/// Format a number for an error message. std::to_string uses six-decimal fixed
+/// notation, which renders every inertia and coefficient in this file as
+/// "0.000000" and tells the reader nothing about the value being rejected.
+std::string fmtNum(double v) {
+  std::ostringstream o;
+  o << std::setprecision(6) << v;
+  return o.str();
 }
 
 }  // namespace
@@ -94,6 +105,27 @@ struct QuadConfigParser {
     return n;
   }
 
+  /// Same, but the result must itself be a mapping -- required before the
+  /// keyed blocks below are iterated, because iterating a sequence or a scalar
+  /// yields entries whose `first` is an invalid node.
+  YAML::Node requireMap(const YAML::Node& parent, const std::string& key,
+                        const std::string& parent_path) const {
+    const YAML::Node n = require(parent, key, parent_path);
+    if (!n.IsMap()) bad(join(parent_path, key), "expected a mapping");
+    return n;
+  }
+
+  /// Optional scalar with a default. Goes through scalarAs, so a value of the
+  /// wrong type is a ConfigError rather than an escaping yaml-cpp exception.
+  template <typename T>
+  T optScalar(const YAML::Node& parent, const std::string& key, const std::string& parent_path,
+              T fallback) const {
+    if (!parent.IsMap()) bad(parent_path, "expected a mapping");
+    const YAML::Node n = parent[key];
+    if (!n || n.IsNull()) return fallback;
+    return scalarAs<T>(n, join(parent_path, key));
+  }
+
   template <typename T>
   T scalarAs(const YAML::Node& n, const std::string& path) const {
     try {
@@ -164,10 +196,10 @@ struct QuadConfigParser {
   }
 
   void requirePositive(const ParamD& p) const {
-    if (!(p.value > 0.0)) bad(p.path, "must be > 0, got " + std::to_string(p.value));
+    if (!(p.value > 0.0)) bad(p.path, "must be > 0, got " + fmtNum(p.value));
   }
   void requireNonNegative(const ParamD& p) const {
-    if (!(p.value >= 0.0)) bad(p.path, "must be >= 0, got " + std::to_string(p.value));
+    if (!(p.value >= 0.0)) bad(p.path, "must be >= 0, got " + fmtNum(p.value));
   }
   void requireAllPositive(const ParamV3& p) const {
     if (!(p.value.array() > 0.0).all()) bad(p.path, "all three components must be > 0");
@@ -224,10 +256,31 @@ struct QuadConfigParser {
     requireAllPositive(cfg.mass.inertia_diag);
     cfg.mass.inertia_products = vec3(m, "inertia_products", "mass");
 
-    // A rigid body's principal moments must satisfy the triangle inequalities.
-    const Eigen::Vector3d& d = cfg.mass.inertia_diag.value;
-    if (d.x() + d.y() < d.z() || d.y() + d.z() < d.x() || d.z() + d.x() < d.y()) {
-      bad("mass.inertia_diag", "violates the inertia triangle inequality; no rigid body has these moments");
+    // Validate the FULL tensor, not just the diagonal: `inertia_products`
+    // feeds the same matrix, and InertiaProperties inverts it unconditionally.
+    // A singular tensor turns every later state into NaN with no diagnostic; an
+    // indefinite one is worse, because the sim keeps running and gains energy.
+    // Both checks therefore run on the principal moments (the eigenvalues),
+    // which is the only formulation the products cannot sneak past.
+    const Eigen::Matrix3d I = cfg.mass.inertiaMatrix();
+    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(I);
+    if (solver.info() != Eigen::Success) {
+      bad("mass.inertia_diag", "could not diagonalise the inertia tensor built from inertia_diag and "
+                               "inertia_products");
+    }
+    const Eigen::Vector3d principal = solver.eigenvalues();  // ascending
+    if (!(principal.minCoeff() > 0.0)) {
+      bad("mass.inertia_products",
+          "the inertia tensor built from mass.inertia_diag and mass.inertia_products is not positive "
+          "definite (smallest principal moment " + fmtNum(principal.minCoeff()) +
+          "); no rigid body has these moments, and inverting it would make the whole sim NaN");
+    }
+    if (principal(0) + principal(1) < principal(2)) {
+      bad("mass.inertia_products",
+          "the principal moments of the inertia tensor violate the triangle inequality (" +
+          fmtNum(principal(0)) + " + " + fmtNum(principal(1)) + " < " +
+          fmtNum(principal(2)) + "); no rigid body has these moments. Note this is checked on "
+          "the eigenvalues, so mass.inertia_products can cause it even when mass.inertia_diag looks fine");
     }
   }
 
@@ -239,14 +292,14 @@ struct QuadConfigParser {
       cfg.motors.at(id).position = vec3(geom, toString(id), "motors.geometry");
     }
 
-    const YAML::Node spin = require(mo, "spin", "motors");
-    cfg.motors.spin_verified = spin["verified"] && scalarAs<bool>(spin["verified"], "motors.spin.verified");
+    const YAML::Node spin = requireMap(mo, "spin", "motors");
+    cfg.motors.spin_verified = optScalar<bool>(spin, "verified", "motors.spin", false);
     int seen = 0, cw = 0;
     for (const auto& kv : spin) {
-      const auto key = kv.first.as<std::string>();
+      const auto key = scalarAs<std::string>(kv.first, "motors.spin");
       if (key == "verified" || key == "source") continue;
       const MotorId id = motorIdFromString(key);
-      const auto s = kv.second.as<std::string>();
+      const auto s = scalarAs<std::string>(kv.second, join("motors.spin", key));
       if (s == "CW") {
         cfg.motors.at(id).spin = Spin::CW;
         ++cw;
@@ -266,11 +319,11 @@ struct QuadConfigParser {
       bad("motors.spin", "diagonally opposite motors (FL/RR) must spin the same way");
     }
 
-    const YAML::Node order = require(mo, "betaflight_order", "motors");
-    cfg.motors.order_verified = order["verified"] && scalarAs<bool>(order["verified"], "motors.betaflight_order.verified");
+    const YAML::Node order = requireMap(mo, "betaflight_order", "motors");
+    cfg.motors.order_verified = optScalar<bool>(order, "verified", "motors.betaflight_order", false);
     std::map<int, MotorId> mapping;
     for (const auto& kv : order) {
-      const auto key = kv.first.as<std::string>();
+      const auto key = scalarAs<std::string>(kv.first, "motors.betaflight_order");
       if (key == "verified" || key == "source") continue;
       int idx = 0;
       try {
@@ -279,7 +332,7 @@ struct QuadConfigParser {
         bad(join("motors.betaflight_order", key), "expected a motor index 1..4");
       }
       if (idx < 1 || idx > 4) bad(join("motors.betaflight_order", key), "index out of range 1..4");
-      mapping[idx] = motorIdFromString(kv.second.as<std::string>());
+      mapping[idx] = motorIdFromString(scalarAs<std::string>(kv.second, join("motors.betaflight_order", key)));
     }
     if (mapping.size() != 4) {
       bad("motors.betaflight_order", "expected indices 1..4, got " + std::to_string(mapping.size()));
@@ -333,17 +386,18 @@ struct QuadConfigParser {
       bad("battery.initial_soc", "must be in [0, 1]");
     }
 
-    const YAML::Node c = require(b, "ocv_curve", "battery");
+    const YAML::Node c = requireMap(b, "ocv_curve", "battery");
     if (!c["measured"]) bad("battery.ocv_curve", "missing `measured:`");
     cfg.battery.ocv_measured = scalarAs<bool>(c["measured"], "battery.ocv_curve.measured");
-    cfg.battery.ocv_source = c["source"] ? c["source"].as<std::string>() : "";
+    cfg.battery.ocv_source = optScalar<std::string>(c, "source", "battery.ocv_curve", std::string{});
     if (!cfg.battery.ocv_measured) cfg.unmeasured.push_back("battery.ocv_curve");
 
     const YAML::Node pts = require(c, "points", "battery.ocv_curve");
     if (!pts.IsSequence() || pts.size() < 2) bad("battery.ocv_curve.points", "expected at least two points");
     for (const auto& pn : pts) {
-      OcvPoint p{require(pn, "soc", "battery.ocv_curve.points").as<double>(),
-                 require(pn, "v", "battery.ocv_curve.points").as<double>()};
+      OcvPoint p{scalarAs<double>(require(pn, "soc", "battery.ocv_curve.points"), "battery.ocv_curve.points.soc"),
+                 scalarAs<double>(require(pn, "v", "battery.ocv_curve.points"), "battery.ocv_curve.points.v")};
+      if (!std::isfinite(p.soc) || !std::isfinite(p.v)) bad("battery.ocv_curve.points", "must be finite");
       if (!cfg.battery.ocv_curve.empty()) {
         const auto& prev = cfg.battery.ocv_curve.back();
         if (p.soc <= prev.soc) bad("battery.ocv_curve.points", "soc must strictly increase");
@@ -415,9 +469,27 @@ struct QuadConfigParser {
       bad("sim.physics_rate", "the project requires at least 1 kHz physics");
     }
 
-    const YAML::Node n = require(s, "net", "sim");
+    // The IMU is a decimator of the physics loop (Multirotor::step), so the
+    // physics rate must be a whole multiple of the IMU rate. Without this the
+    // declared imu.sample_rate is decoration and the synthesised noise density
+    // silently belongs to a different sample period than the one advertised.
+    const double ratio = cfg.sim.physics_rate.value / cfg.imu.sample_rate.value;
+    if (ratio < 1.0) {
+      bad("imu.sample_rate",
+          "imu.sample_rate (" + fmtNum(cfg.imu.sample_rate.value) + " Hz) is faster than "
+          "sim.physics_rate (" + fmtNum(cfg.sim.physics_rate.value) + " Hz); the physics loop "
+          "cannot synthesise IMU samples faster than it runs. Raise sim.physics_rate.");
+    }
+    if (std::abs(ratio - std::round(ratio)) > 1e-9) {
+      bad("imu.sample_rate",
+          "sim.physics_rate (" + fmtNum(cfg.sim.physics_rate.value) + " Hz) is not a whole "
+          "multiple of imu.sample_rate (" + fmtNum(cfg.imu.sample_rate.value) + " Hz); the IMU "
+          "decimates the physics loop, so the ratio must be an integer (got " + fmtNum(ratio) + ")");
+    }
+
+    const YAML::Node n = requireMap(s, "net", "sim");
     auto& net = cfg.sim.net;
-    net.sitl_verified = n["sitl_verified"] && n["sitl_verified"].as<bool>();
+    net.sitl_verified = optScalar<bool>(n, "sitl_verified", "sim.net", false);
     net.sitl_host = str(n, "sitl_host", "sim.net");
     net.sitl_fdm_port = scalarAs<int>(require(n, "sitl_fdm_port", "sim.net"), "sim.net.sitl_fdm_port");
     net.sitl_motor_port = scalarAs<int>(require(n, "sitl_motor_port", "sim.net"), "sim.net.sitl_motor_port");
@@ -460,7 +532,16 @@ QuadConfig parseQuadConfig(const std::string& yaml_text, const std::string& orig
     throw ConfigError(origin + ": not valid YAML: " + e.what());
   }
   if (!parser.root || !parser.root.IsMap()) throw ConfigError(origin + ": expected a top-level mapping");
-  return parser.run();
+  try {
+    return parser.run();
+  } catch (const YAML::Exception& e) {
+    // Belt and braces. Every read above goes through scalarAs(), which reports
+    // the dotted path; this only catches a node access that slipped past it.
+    // The loader's contract (quad_config.hpp) is that ANY config fault is a
+    // ConfigError -- callers catch only that, so an escaping yaml-cpp
+    // exception aborts the process instead of printing a diagnostic.
+    throw ConfigError(origin + ": malformed YAML: " + e.what());
+  }
 }
 
 QuadConfig loadQuadConfig(const std::string& path) {

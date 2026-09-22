@@ -395,3 +395,124 @@ TEST(Multirotor, RunsFasterThanRealTime) {
 
   EXPECT_GT(ratio, 20.0) << "headless replay needs to be much faster than real time; got " << ratio << "x";
 }
+
+// --- placeOnGround() must actually place it ON the ground ------------------
+//
+// The shipped config has all four motors at z = 0, which hides any coupling
+// between motor z and the parked height. Real measured geometry has the mounts
+// above the CG plane (negative z in FRD), so these run with that.
+
+namespace {
+
+fdt::QuadConfig configWithMotorsAboveTheCg(double motor_z) {
+  fdt::QuadConfig cfg = config();
+  for (const auto id : fdt::kAllMotorIds) cfg.motors.at(id).position.value.z() = motor_z;
+  return cfg;
+}
+
+}  // namespace
+
+TEST(Multirotor, PlacedOnGroundStartsInContactWhenMotorsAreNotInTheCgPlane) {
+  fdt::Multirotor m(configWithMotorsAboveTheCg(-0.015));
+  m.placeOnGround();
+  EXPECT_TRUE(m.telemetry().in_contact)
+      << "placeOnGround() must leave the quad touching the ground, not hovering above it";
+}
+
+TEST(Multirotor, PlacedOnGroundDoesNotDropWhenMotorsAreNotInCgPlane) {
+  fdt::Multirotor m(configWithMotorsAboveTheCg(-0.015));
+  m.placeOnGround();
+  m.setMotorCommands(commands(0, 0, 0, 0));
+  const double z0 = m.state().position.z();
+
+  run(m, 0.5);
+
+  // Settled means settled: no free fall, no bounce, no sinking.
+  EXPECT_NEAR(m.state().position.z(), z0, 1e-3) << "a quad placed on the ground must not drop";
+  EXPECT_LT(std::abs(m.state().velocity.z()), 0.01) << "and must not be accelerating downward";
+  EXPECT_TRUE(m.telemetry().in_contact);
+}
+
+TEST(Multirotor, PlacedOnGroundSpringsCarryExactlyTheWeight) {
+  const auto cfg = configWithMotorsAboveTheCg(-0.015);
+  fdt::Multirotor m(cfg);
+  m.placeOnGround();
+
+  // The documented contract: at the spawn depth the contact springs carry the
+  // weight exactly, which is what makes it start settled rather than dropping.
+  const double weight = m.inertia().mass * fdt::kGravity;
+  const double depth = weight / (4.0 * cfg.ground.contact_stiffness.value);
+  fdt::GroundModel g(cfg.ground, cfg.motors);
+  EXPECT_NEAR(g.penetration(m.state()), depth, 1e-12);
+  EXPECT_NEAR(-g.wrench(m.state()).force.z(), weight, 1e-9);
+}
+
+// --- the IMU runs on its own clock ----------------------------------------
+//
+// imu.sample_rate is a real parameter: docs/parameters_to_measure.md says it
+// must match the FC's gyro rate or the noise will not match a real log. The
+// noise sigma is density/sqrt(sample period), so it must come from the IMU's
+// period and not from whatever step the caller happens to pass to step().
+
+TEST(Multirotor, ImuNoiseSigmaFollowsTheConfiguredSampleRateNotThePhysicsStep) {
+  auto cfg = config();
+  // Deliberately mismatched: a 1 kHz IMU sampled from an 8 kHz physics loop.
+  // If sigma is taken from the physics step instead of the IMU period it comes
+  // out sqrt(8) too large, which is exactly the bug this pins.
+  cfg.imu.sample_rate.value = 1000.0;
+  cfg.imu.gyro_bias.value.setZero();
+  cfg.imu.gyro_bias_walk.value = 0.0;
+
+  fdt::Multirotor m(cfg);
+  EXPECT_DOUBLE_EQ(m.imuPeriod(), 1.0 / cfg.imu.sample_rate.value)
+      << "the IMU period must come from imu.sample_rate, not from the physics step";
+
+  m.reset(airborne(100.0));
+  m.setMotorCommands(commands(0, 0, 0, 0));  // free fall: the true gyro stays at zero
+
+  const double dt = 1.0 / 8000.0;
+  double sum_sq = 0.0;
+  int drawn = 0;
+  Eigen::Vector3d previous = Eigen::Vector3d::Zero();
+  for (int i = 0; i < 80000; ++i) {
+    m.step(dt);
+    const Eigen::Vector3d g = m.telemetry().imu.gyro;
+    if (g != previous) {  // count each fresh draw once, not the held repeats
+      sum_sq += g.x() * g.x();
+      ++drawn;
+      previous = g;
+    }
+  }
+  ASSERT_GT(drawn, 1000) << "expected ~10000 draws from a 1 kHz IMU over 10 s";
+
+  const double sigma = std::sqrt(sum_sq / static_cast<double>(drawn));
+  const double expected = cfg.imu.gyro_noise_density.value / std::sqrt(m.imuPeriod());
+  EXPECT_NEAR(sigma, expected, 0.05 * expected)
+      << "gyro sigma must be density*sqrt(sample_rate), got " << sigma << " want " << expected
+      << " (density/sqrt(physics dt) would give "
+      << cfg.imu.gyro_noise_density.value / std::sqrt(dt) << ")";
+}
+
+TEST(Multirotor, ImuSampleIsHeldBetweenImuTicksWhenPhysicsRunsFaster) {
+  auto cfg = config();
+  // Physics four times faster than the IMU: three steps in four must reuse the
+  // held sample rather than inventing a new one.
+  cfg.imu.sample_rate.value = 2000.0;
+
+  fdt::Multirotor m(cfg);
+  m.reset(airborne(100.0));
+  m.setMotorCommands(commands(0, 0, 0, 0));
+
+  const double dt = 1.0 / 8000.0;
+  int fresh = 0;
+  Eigen::Vector3d previous = Eigen::Vector3d::Zero();
+  for (int i = 0; i < 8000; ++i) {
+    m.step(dt);
+    if (m.telemetry().imu.gyro != previous) {
+      ++fresh;
+      previous = m.telemetry().imu.gyro;
+    }
+  }
+  // 8000 steps at 8 kHz is one second; a 2 kHz IMU draws ~2000 samples.
+  EXPECT_NEAR(fresh, 2000, 20) << "the IMU must decimate the physics loop, not run at its rate";
+}

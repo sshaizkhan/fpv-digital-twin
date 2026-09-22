@@ -74,7 +74,7 @@ Per-cell OCV curve against state of charge, linearly interpolated and clamped,
 times the cell count, minus `I * R_internal`.
 
 The sag is computed with the **previous** step's current rather than solved
-simultaneously with the motors. At 1–2 kHz that lag is orders of magnitude
+simultaneously with the motors. At 1–8 kHz that lag is orders of magnitude
 below anything measurable, and it avoids an implicit solve in the hot loop.
 
 State of charge is a straight coulomb count, clamped to `[0, 1]`. No
@@ -108,11 +108,19 @@ push, plus Coulomb friction bounded by `mu * F_normal` and softened near zero
 tangential speed (a fixed 0.05 m/s regulariser, numerical rather than
 physical, which is why it is not in `quad.yaml`).
 
+The contact points take their **x and y** from the motor positions, but their z
+is `stand_height` alone — the motor's own z does not enter. `stand_height` is
+defined as the height of the CG above the ground when the quad is parked, so the
+feet must sit exactly that far below the CG whatever plane the mounts are in.
+`Multirotor::placeOnGround()` relies on that: it spawns the quad at the depth
+where the four springs carry the weight exactly, which is only the right depth
+if the feet are where `stand_height` says they are.
+
 Four points rather than one is what lets a parked quad sit level and a landing
 on one arm tip the way a real one does.
 
 This is **tuned for stability, not realism**. With the shipped numbers the
-contact resonance is ~34 Hz against a 1–2 kHz step, damping ratio ~0.8. Do not
+contact resonance is ~34 Hz against a 1–8 kHz step, damping ratio ~0.8. Do not
 read anything into a crash the sim produces.
 
 ## IMU (`physics/src/imu.cpp`)
@@ -122,10 +130,18 @@ unit mass, in the body frame. Level at rest it reads `[0, 0, -9.80665]`; in
 free fall it reads zero. Since the wrench handed to the integrator already
 excludes gravity, this is simply `F_body / m`.
 
-Gaussian white noise from the configured densities (`sigma = density /
-sqrt(dt)`), plus a bias that random-walks. Drawn from a seeded `mt19937_64`,
-so a run is reproducible bit for bit — Phase 4's log replay depends on that,
-and there is a test pinning it.
+The IMU runs on **its own clock**, decimating the physics loop: it produces a
+sample every `1 / imu.sample_rate` seconds and the previous sample is held in
+between, which is what Betaflight reads too. So the noise is `sigma = density /
+sqrt(imu_period)` with `imu_period = 1 / imu.sample_rate` — *not* the physics
+step. That is what makes a real gyro rate in `quad.yaml` produce a real noise
+floor for the Phase 4 overlay to be fitted against. The loader enforces that
+`sim.physics_rate` is a whole multiple of `imu.sample_rate`, since the physics
+cannot synthesise samples faster than it runs.
+
+Bias is added on top and random-walks. Everything is drawn from a seeded
+`mt19937_64`, so a run is reproducible bit for bit — Phase 4's log replay
+depends on that, and there is a test pinning it.
 
 **Not modelled:** the gyro/accel lever arm from the CG (the IMU is assumed at
 the CG — worth adding once `camera.position`-style offsets are measured),
@@ -137,12 +153,15 @@ Vibration is the significant omission for matching real Blackbox noise floors;
 
 Per step: hold the pack voltage, RK4 the rigid body (with the motor lag
 sampled analytically at each stage), commit the motor speeds, charge the pack
-for the step's current, then refresh telemetry and draw one IMU sample.
+for the step's current, then refresh telemetry and, if the IMU's period has
+elapsed, draw an IMU sample.
 
 Given the same config, seed, initial state and command sequence, `step()` is
-bit-identical. Measured throughput is **~0.33 us/step, about 1500x real time**
-at 2 kHz on an M-series Mac, so the "deterministic and faster than real time"
-requirement for replay has a lot of headroom.
+bit-identical. Measured throughput is **~0.34 us/step** on an M-series Mac,
+independent of the step rate: about 1500x real time at 2 kHz and ~364x at the
+shipped 8 kHz. The "deterministic and faster than real time" requirement for
+replay has a lot of headroom. (Writing the `--out` CSV costs a further ~4.4 us
+per row and dominates a traced run; the physics does not.)
 
 ## What Phase 1 deliberately leaves out
 

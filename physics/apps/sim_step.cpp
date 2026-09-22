@@ -3,6 +3,9 @@
 //   fdt_sim [--config PATH] [--profile NAME] [--duration S] [--rate HZ]
 //           [--out FILE.csv] [--seed N]
 //
+// --rate defaults to sim.physics_rate from the config, which is the single
+// source of truth for the step size; pass --rate only to override it.
+//
 // Profiles:
 //   hover     trimmed hover, open loop
 //   althold   trimmed hover with a proportional altitude hold
@@ -20,6 +23,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <string>
 
 namespace {
@@ -53,7 +57,9 @@ int main(int argc, char** argv) {
   std::string profile = "hover";
   std::string out_path;
   double duration = 5.0;
-  double rate = 2000.0;
+  // Unset means "take it from sim.physics_rate", which cannot be read until the
+  // config is loaded -- below, after the argument loop.
+  std::optional<double> rate_override;
   uint64_t seed = 0;
 
   for (int i = 1; i < argc; ++i) {
@@ -67,11 +73,12 @@ int main(int argc, char** argv) {
       else if (a == "--profile") profile = next("--profile");
       else if (a == "--out") out_path = next("--out");
       else if (a == "--duration") duration = std::stod(next("--duration"));
-      else if (a == "--rate") rate = std::stod(next("--rate"));
+      else if (a == "--rate") rate_override = std::stod(next("--rate"));
       else if (a == "--seed") seed = std::stoull(next("--seed"));
       else if (a == "-h" || a == "--help") {
         std::cout << "usage: fdt_sim [--config PATH] [--profile hover|althold|freefall|takeoff|rollstep]"
-                     " [--duration S] [--rate HZ] [--out FILE.csv] [--seed N]\n";
+                     " [--duration S] [--rate HZ] [--out FILE.csv] [--seed N]\n"
+                     "  --rate defaults to sim.physics_rate from the config\n";
         return 0;
       } else {
         std::cerr << "unknown argument: " << a << "\n";
@@ -85,6 +92,18 @@ int main(int argc, char** argv) {
 
   try {
     const fdt::QuadConfig cfg = fdt::loadQuadConfig(config_path);
+
+    // The config owns the physics rate; --rate is an override, not the default.
+    const double rate = rate_override.value_or(cfg.sim.physics_rate.value);
+    if (!std::isfinite(rate) || rate <= 0.0) {
+      std::cerr << "--rate must be a positive number of hertz, got " << rate << "\n";
+      return 2;
+    }
+    if (!std::isfinite(duration) || duration <= 0.0) {
+      std::cerr << "--duration must be a positive number of seconds, got " << duration << "\n";
+      return 2;
+    }
+
     fdt::Multirotor m(cfg, seed);
 
     if (profile == "takeoff") {
@@ -113,6 +132,10 @@ int main(int argc, char** argv) {
 
     const double dt = 1.0 / rate;
     const long steps = std::lround(duration / dt);
+    if (steps < 1) {
+      std::cerr << "--duration " << duration << " s at --rate " << rate << " Hz is less than one step\n";
+      return 2;
+    }
     const double hover = m.hoverCommand();
 
     const auto t0 = std::chrono::steady_clock::now();
