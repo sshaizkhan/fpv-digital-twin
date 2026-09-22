@@ -138,6 +138,18 @@ motors:
       source: "PLACEHOLDER: kQ/kT ~ 0.0055 m, typical for a 5in tri-blade.
         Dominates yaw authority - fit this in Phase 4."
 
+    load_factor:
+      # Loaded rotor speed at full throttle as a fraction of the unloaded
+      # kv * V. A prop is a load: the motor does not reach its no-load RPM.
+      # Without this the model spins to ~28500 rpm at full throttle, which
+      # contradicts the ~21400 rpm the thrust_coeff above was derived at.
+      value: 0.75
+      units: fraction
+      measured: false
+      source: "PLACEHOLDER: typical loaded/unloaded RPM ratio for a 5in tri-blade.
+        Measure directly: full throttle on a thrust stand, or read RPM from a
+        Blackbox log with bidirectional DSHOT telemetry enabled."
+
     time_constant:
       # first-order lag from motor command to rotor speed
       value: 0.025

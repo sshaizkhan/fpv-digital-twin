@@ -1,6 +1,6 @@
 # What to measure, and how
 
-`config/quad.yaml` currently ships **39 unmeasured parameters**. They are all
+`config/quad.yaml` currently ships **40 unmeasured parameters**. They are all
 plausible for a 5" quad, and all of them are guesses. Run:
 
 ```sh
@@ -32,6 +32,7 @@ is actually trying to match: the gyro response to a stick input.
 | `motors.model.thrust_coeff` | kT, thrust = kT·ω² | Thrust stand, or fit it in Phase 4 from a hover: at a steady hover, 4·kT·ω² = m·g, and the RPM is in the Blackbox log if bidirectional DSHOT telemetry is on. |
 | `motors.model.time_constant` | Motor spin-up lag | Fit in Phase 4 from a step input in a real log, or a thrust stand with a step command. This sets how much of your D-term behaviour the sim can reproduce. |
 | `motors.model.torque_coeff` | kQ, drag torque = kQ·ω² | Sets yaw authority almost entirely. Thrust stand with a torque cell, or fit against a real yaw step. |
+| `motors.model.load_factor` | Loaded RPM at full throttle, as a fraction of the no-load `kv·V` | A prop is a load, so the motor never reaches `kv·V`. Read RPM straight off a Blackbox log with bidirectional DSHOT telemetry on, at full throttle, and divide by `kv · V_pack`. Or a thrust stand with a tachometer. Sets your top speed and your full-throttle thrust. |
 
 ## Tier 2 — visible in the overlay, fit in Phase 4
 

@@ -300,6 +300,7 @@ struct QuadConfigParser {
     const YAML::Node mdl = require(mo, "model", "motors");
     auto& M = cfg.motors.model;
     M.kv = num(mdl, "kv", "motors.model");
+    M.load_factor = num(mdl, "load_factor", "motors.model");
     M.thrust_coeff = num(mdl, "thrust_coeff", "motors.model");
     M.torque_coeff = num(mdl, "torque_coeff", "motors.model");
     M.time_constant = num(mdl, "time_constant", "motors.model");
@@ -307,6 +308,10 @@ struct QuadConfigParser {
     M.resistance = num(mdl, "resistance", "motors.model");
     M.max_rpm_safety = num(mdl, "max_rpm_safety", "motors.model");
     requirePositive(M.kv);
+    requirePositive(M.load_factor);
+    if (M.load_factor.value > 1.0) {
+      bad(M.load_factor.path, "a loaded prop cannot spin faster than the no-load kv*V");
+    }
     requirePositive(M.thrust_coeff);
     requirePositive(M.torque_coeff);
     requirePositive(M.time_constant);

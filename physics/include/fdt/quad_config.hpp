@@ -67,6 +67,7 @@ struct MotorGeometry {
 
 struct MotorModel {
   ParamD kv;              ///< rpm/V, unloaded
+  ParamD load_factor;     ///< loaded/unloaded rotor speed at full throttle, (0, 1]
   ParamD thrust_coeff;    ///< kT, N/(rad/s)^2
   ParamD torque_coeff;    ///< kQ, N*m/(rad/s)^2
   ParamD time_constant;   ///< s, first-order command -> rotor speed lag

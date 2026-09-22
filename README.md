@@ -16,12 +16,12 @@ macOS / Apple Silicon.
 | Phase | What | State |
 |---|---|---|
 | 0 | Repo scaffold, CMake build, `quad.yaml` schema, README | ✅ done |
-| 1 | Physics core standalone, with unit tests | plan pending |
+| 1 | Physics core standalone, with unit tests | ✅ done |
 | 2 | Betaflight SITL builds and runs, loop closed, stable hover | blocked: firmware version unknown |
 | 3 | Radio input live, Godot viewer, acro flight from FPV | not started |
 | 4 | Blackbox replay, sim-vs-real overlay, parameter fitting | not started |
 
-**39 of the parameters in `config/quad.yaml` are estimates, not measurements.**
+**40 of the parameters in `config/quad.yaml` are estimates, not measurements.**
 That is expected at Phase 0, and every one of them is flagged in the file and
 listed by `fdt_config_dump`. See [`docs/parameters_to_measure.md`](docs/parameters_to_measure.md)
 for what to measure and how.
@@ -29,9 +29,10 @@ for what to measure and how.
 ## Layout
 
 ```
-physics/     C++17 core. Phase 0 ships the quad.yaml loader; the 6DOF
-             integrator, motor/battery models, IMU synthesis and the
-             SITL / SDL2 / viewer I/O follow in later phases.
+physics/     C++17 core. Phase 1 ships the 6DOF integrator, motor,
+             battery, aero, ground-contact and IMU models, assembled in
+             Multirotor, plus the quad.yaml loader. The SITL / SDL2 /
+             viewer I/O follows in later phases.
 third_party/ Betaflight submodule (Phase 2), pinned to the FC's firmware tag.
 viewer/      Godot 4 FPV view (Phase 3).
 tools/       Python: Blackbox parsing, stick replay, fitting (Phase 4).
@@ -69,7 +70,7 @@ Presets: `default` (RelWithDebInfo + Ninja), `debug`, `release`
 `build/<preset>/`.
 
 Verified on macOS 15.1 / Apple Silicon with Apple clang 16 and CMake 4.2.3:
-**18/18 tests pass, clean at `-Wall -Wextra -Wpedantic -Wconversion -Werror`.**
+**95/95 tests pass, clean at `-Wall -Wextra -Wpedantic -Wconversion -Werror`.**
 
 ## Run what exists today
 
@@ -99,6 +100,27 @@ Other flags: `--list-unmeasured` (dotted paths only, for scripting) and
 `--strict` (exit non-zero while anything is unmeasured — turn this on in CI once
 the real measurements are in, so they cannot quietly regress to guesses).
 
+Fly it headless, with no Betaflight and no viewer:
+
+```sh
+./build/make/physics/fdt_sim --profile althold --duration 10 --out /tmp/trace.csv
+```
+
+```
+profile      : althold
+steps        : 20000 at 2000.0 Hz (10.0 s)
+wall clock   : 0.007 s  ->  1505.6x real time, 0.33 us/step
+hover cmd    : 34.603 %
+final alt    : 9.975 m
+battery      : 16.741 V, 1.791 A, soc 99.885 %
+```
+
+Profiles: `hover` (open loop, sinks slowly as the pack sags — that is correct),
+`althold` (a proportional altitude hold on top of it), `freefall`, `takeoff`,
+`rollstep`. `--out` writes a 29-column CSV trace: pose, quaternion, body rates,
+synthesised gyro and accel, per-motor RPM, thrust, pack voltage/current/SoC and
+the ground-contact flag.
+
 ## How parameters work
 
 Every number in `config/quad.yaml` is a block that must declare where it came
@@ -124,7 +146,9 @@ schema check on the real file.
 ## Conventions
 
 Read [`docs/coordinate_frames.md`](docs/coordinate_frames.md) before writing any
-code that touches a sign or an axis. Summary:
+code that touches a sign or an axis, and
+[`docs/physics_model.md`](docs/physics_model.md) for what the model actually
+does and which assumptions are load-bearing. Summary:
 
 - World **NED**, body **FRD** (x forward, y right, z down), origin at the CG.
 - Attitude as a quaternion `q_wb` (body → world), Hamilton, scalar-first on the

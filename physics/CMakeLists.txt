@@ -4,6 +4,13 @@
 
 add_library(fdt_physics
   src/quad_config.cpp
+  src/rigid_body.cpp
+  src/battery.cpp
+  src/motor.cpp
+  src/aero.cpp
+  src/ground.cpp
+  src/imu.cpp
+  src/multirotor.cpp
 )
 
 target_include_directories(fdt_physics PUBLIC
@@ -22,11 +29,19 @@ add_library(fdt::physics ALIAS fdt_physics)
 add_executable(fdt_config_dump apps/config_dump.cpp)
 target_link_libraries(fdt_config_dump PRIVATE fdt_physics fdt_warnings)
 
+add_executable(fdt_sim apps/sim_step.cpp)
+target_link_libraries(fdt_sim PRIVATE fdt_physics fdt_warnings)
+
 # --- tests -----------------------------------------------------------------
 
 if(FDT_BUILD_TESTS)
   add_executable(fdt_physics_tests
     tests/test_quad_config.cpp
+    tests/test_rigid_body.cpp
+    tests/test_propulsion.cpp
+    tests/test_aero_ground.cpp
+    tests/test_imu.cpp
+    tests/test_multirotor.cpp
   )
   target_link_libraries(fdt_physics_tests PRIVATE fdt_physics GTest::gtest_main fdt_warnings)
   target_compile_definitions(fdt_physics_tests PRIVATE FDT_REPO_ROOT="${FDT_REPO_ROOT}")
