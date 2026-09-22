@@ -41,10 +41,6 @@ RUN make TARGET=SITL ARM_SDK_DIR=/usr -j"$(nproc)" \
 # ---- runtime --------------------------------------------------------------
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      iproute2 \
- && rm -rf /var/lib/apt/lists/*
-
 COPY --from=build /src/betaflight/obj/main/betaflight_SITL.elf /usr/local/bin/betaflight_SITL
 COPY sitl-entrypoint.sh /usr/local/bin/sitl-entrypoint.sh
 RUN chmod +x /usr/local/bin/sitl-entrypoint.sh
@@ -54,9 +50,12 @@ RUN chmod +x /usr/local/bin/sitl-entrypoint.sh
 WORKDIR /data
 VOLUME ["/data"]
 
-# 9001 pwm_raw out, 9002 pwm out, 9003 state in, 9004 rc in (sitl.c:80-83);
+# Only the ports SITL actually LISTENS on. 9001/9002 are its outbound direction
+# (sitl.c:80-81 "// Out", udpInit(..., isServer=false) at :310,:313) -- nothing
+# in here binds them, and publishing them would take the host port away from the
+# physics process that has to receive on it.
 # 5761 = UART1 for the Configurator (serial_tcp.c:41,113 -> BASE_PORT+id+1).
 EXPOSE 5761/tcp
-EXPOSE 9001/udp 9002/udp 9003/udp 9004/udp
+EXPOSE 9003/udp 9004/udp
 
 ENTRYPOINT ["/usr/local/bin/sitl-entrypoint.sh"]

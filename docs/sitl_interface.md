@@ -277,11 +277,34 @@ So: **Docker**, which CLAUDE.md names as the sanctioned fallback.
 ```
 
 See [`../docker/Dockerfile.sitl`](../docker/Dockerfile.sitl). It fetches
-Betaflight **by commit** and asserts the checkout matches, so the image cannot
-drift from `third_party/betaflight`. The entrypoint resolves the host to a
-numeric IP because of the `inet_addr()` limit in §2.
+Betaflight **by commit** and asserts the checkout matches, and the image is
+**tagged by that commit** (`fdt-betaflight-sitl:<12-char sha>`) so that bumping
+the firmware is necessarily a cache miss — a fixed `:4.5.1` tag would let
+`docker image inspect` succeed and silently keep running the old binary. The
+entrypoint resolves the host to a numeric IP because of the `inet_addr()` limit
+in §2, and **fails rather than falling back** to the default gateway: on Docker
+Desktop that gateway is inside the Linux VM, not the macOS host, so guessing it
+would send motor packets into a black hole with every check still passing.
 
-Ports published: `5761/tcp` (Configurator), `9001-9004/udp`.
+**Ports published: `127.0.0.1:5761/tcp` (Configurator), `127.0.0.1:9003/udp`
+and `127.0.0.1:9004/udp` — and nothing else.** Those three are the only ones
+SITL listens on. 9001 and 9002 are its *outbound* direction (§2), so they need
+no publishing at all: container-outbound UDP is NAT'd anyway, and publishing
+them would make Docker take ownership of the host port that the **physics
+process** has to bind in order to receive motor outputs — a host `bind()` on a
+published port fails with `EADDRINUSE`. Loopback binding matters because MSP on
+5761 is unauthenticated full control of the FC, and 9003/9004 accept state and
+RC injection — none of *those three* needs to be reachable off-box.
+
+That does **not** extend to the motor direction, and the distinction decides
+whether the physics receiver works at all. Because 9001/9002 are NAT'd
+container-outbound traffic, motor packets reach the macOS host **from the Docker
+VM's address** (a `192.168.65.x` on Docker Desktop), *not* from `127.0.0.1`. So
+the physics motor receiver must **`bind(0.0.0.0, 9002)`**; binding `127.0.0.1`
+drops every packet with no error anywhere — the same silent "physics never
+receives motors" symptom §6 is otherwise built to avoid. Narrow the exposure
+with the host firewall, not with the bind address.
+
 `/data` holds `eeprom.bin` — **mount it or the pasted config is lost** when the
 container is removed.
 
