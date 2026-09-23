@@ -635,8 +635,16 @@ the sim differs from the real quad.
 | `beeper`, `beacon` | skipped | No beeper hardware. |
 | `board_name`, `manufacturer_id`, `mcu_id`, `signature`, `resource` | skipped | Describe a SPEEDYBEEF405V4; SITL has none of those pins, and `board_name` can trigger a config reset mid-replay. |
 
-Everything else applies cleanly: **22 lines, 0 rejected**, and the PID tune
-verifies after the reboot (`p_pitch 47`, `i_pitch 84`, `d_pitch 46`).
+Everything else applies cleanly: **22 lines, 0 rejected**. After the reboot
+the loader reads back **every `set` it sent** and fails on any mismatch. The
+diff only lists non-default values and opens with `defaults nosave`, so that
+readback is what proves the save stuck. (This diff carries no PID or rate
+lines -- the tune is Betaflight's defaults -- so checking named PID settings
+would prove nothing.)
+
+**If any line is rejected, the loader does not save.** Saving would write the
+rejected settings to eeprom at their defaults. Fix the diff or the skip lists,
+restart SITL, and re-run.
 
 ### Three behaviours worth knowing before touching SITL's CLI
 
@@ -645,8 +653,12 @@ verifies after the reboot (`p_pitch 47`, `i_pitch 84`, `d_pitch 46`).
 2. **The diff opens a command batch and never closes it.** `diff all` emits
    `batch start`; the real FC's `save` ends it implicitly. Inside an open batch
    the CLI answers every other command with `UNKNOWN COMMAND`, which is
-   baffling to debug — `exit` looks like it does not exist. The loader sends
-   `batch end` explicitly.
+   baffling to debug — `exit` looks like it does not exist. The loader does
+   **not** send `batch end` before `save`: `batch end` clears the batch's error
+   flag (`cli.c:4165-4189`), and that flag is what makes Betaflight refuse to
+   `save` a partly applied config (`cli.c:4194-4199`, `USE_CLI_BATCH` is on
+   for every target, `common_pre.h:299`). `save` reboots, which discards the
+   batch anyway.
 3. **Entering the CLI blocks MSP.** A FC sitting at the `#` prompt answers no
    MSP at all, so the physics side and the Configurator both find it dead. This
    bit the loader's own readiness probe, which used `#` to detect a booted FC

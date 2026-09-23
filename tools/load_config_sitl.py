@@ -87,9 +87,6 @@ BOARD_SPECIFIC_SETTINGS = {
     "acc_trim_pitch": "accelerometer trim for the real board",
 }
 
-# A few settings read back after the reboot to prove the config actually stuck.
-VERIFY = ["p_pitch", "i_pitch", "d_pitch", "p_roll", "yaw_rc_rate", "motor_pwm_protocol"]
-
 
 class Cli:
     """Line-oriented client for SITL's CLI over TCP."""
@@ -252,10 +249,12 @@ def main() -> int:
     # CLI would just time out with a confusing "is something else on this
     # port?".
     waited = 0.0
-    while not msp_answers(args.host, args.port) and waited < 30.0:
+    ready = msp_answers(args.host, args.port)
+    while not ready and waited < 30.0:
         time.sleep(1.0)
         waited += 1.0
-    if waited >= 30.0:
+        ready = msp_answers(args.host, args.port)
+    if not ready:
         print(f"SITL at {args.host}:{args.port} never started answering MSP.", file=sys.stderr)
         print("is ./tools/run_sitl.sh running?", file=sys.stderr)
         return 2
@@ -294,17 +293,28 @@ def main() -> int:
         cli.close()
         return 1 if rejected else 0
 
-    # The diff opens a command batch (`batch start`) and never closes it -- the
-    # real FC's `save` ends it implicitly. Close it explicitly: inside an open
-    # batch the CLI rejects other commands as UNKNOWN COMMAND, which is
-    # baffling to debug later.
-    batch_reply = cli.send("batch end")
-    if "batch ended" not in batch_reply.lower() and ERROR_MARKER in batch_reply:
-        print("note: `batch end` was rejected; the diff may not have opened one")
+    # Never save past a rejection. The diff opens with `defaults nosave`, so
+    # every line that did not take would be written to eeprom at its DEFAULT.
+    # Betaflight guards this itself: inside the diff's `batch start`, `save`
+    # is refused once any command has errored (cli.c:4194-4199). Do NOT send
+    # `batch end` first -- it clears that error flag (cli.c:4165-4189) and
+    # would let the partial config through. The batch needs no explicit end:
+    # `save` reboots, which discards it.
+    if rejected:
+        print("\nNOT saving: the config above is only partly applied, and saving it would")
+        print("persist the rejected settings at their defaults. Fix the diff or the skip")
+        print("lists in this script, restart SITL, and re-run. The partial config is in")
+        print("RAM only and is gone after a restart.")
+        cli.close()
+        return 1
 
     print("\nsaving (this reboots the FC, which exits the SITL process)...")
-    cli.send("save")
+    save_reply = cli.send("save")
     cli.close()
+    if ERROR_MARKER in save_reply:
+        # Betaflight refused -- e.g. an error this script did not see.
+        print(f"save was REFUSED by Betaflight:\n  {save_reply.strip()}", file=sys.stderr)
+        return 1
 
     if args.restart_container:
         if not restart_container(args.restart_container, args.host, args.port, args.restart_wait):
@@ -312,7 +322,7 @@ def main() -> int:
     else:
         print("SITL has exited. Restart it, then re-run with --no-save to verify,")
         print("or pass --restart-container fdt-sitl next time.")
-        return 1 if rejected else 0
+        return 0
 
     # --- verify the config survived the reboot ---
     print("\nverifying against the FC:")
@@ -323,6 +333,10 @@ def main() -> int:
         return 2
 
     cli.send("#")
+    # Read back EVERY `set` that was sent. A diff only lists values that differ
+    # from the defaults, and it opens with `defaults nosave`, so each one
+    # reading back as sent is what proves the save stuck. A fixed list of names
+    # can pass by checking settings the diff never touched.
     wanted = {}
     for raw, action, sent, _ in plan:
         m = re.match(r"^set\s+([A-Za-z0-9_]+)\s*=\s*(.+)$", sent) if action in ("send", "override") else None
@@ -345,13 +359,16 @@ def main() -> int:
         return None
 
     mismatches = 0
-    for name in VERIFY:
+    if not wanted:
+        # Nothing to compare means nothing was proven -- not a pass.
+        print("  the diff sent no `set` lines, so there is nothing to verify")
+        mismatches += 1
+    for name, expect in wanted.items():
         got = read_setting(name)
-        expect = wanted.get(name)
         if got is None:
             print(f"  {name:<22} (no reading)")
             mismatches += 1
-        elif expect is not None and got.lower() != expect.lower():
+        elif got.lower() != expect.lower():
             print(f"  {name:<22} {got:<12} MISMATCH, expected {expect}")
             mismatches += 1
         else:
@@ -367,8 +384,8 @@ def main() -> int:
     if not restart_container(args.restart_container, args.host, args.port, args.restart_wait):
         return 2
 
-    if rejected or mismatches:
-        print(f"\n{len(rejected)} rejected, {mismatches} mismatched.")
+    if mismatches:
+        print(f"\n{mismatches} setting(s) did not survive the save.")
         return 1
     print("\nSITL is running your tune, and is answering MSP.")
     return 0
