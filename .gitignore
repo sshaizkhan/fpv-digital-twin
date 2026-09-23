@@ -39,3 +39,4 @@ out/
 
 # Playwright MCP scratch output
 .playwright-mcp/
+viewer-live.png
