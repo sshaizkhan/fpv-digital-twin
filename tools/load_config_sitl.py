@@ -368,6 +368,9 @@ def main() -> int:
         m = re.match(r"^set\s+([A-Za-z0-9_]+)\s*=\s*(.+)$", sent) if action in ("send", "override") else None
         if m:
             wanted[m.group(1)] = m.group(2).strip()
+    # The SITL-only settings were sent after the diff, so they win -- and the
+    # hover depends on them, so they must be proven to have survived too.
+    wanted.update({name: value for name, (value, _) in SITL_EXTRA.items()})
 
     def read_setting(name: str) -> str | None:
         """Read one setting, insisting the reply is actually for this command.

@@ -121,6 +121,20 @@ int main(int argc, char** argv) {
     const fdt::QuadConfig config = fdt::loadQuadConfig(config_path);
     const fdt::ArmSwitch& arm = config.firmware.arm_switch;
 
+    // Each tick must advance the physics by exactly 1/rate: Betaflight runs on
+    // the wall clock, so any mismatch silently speeds up or slows down the
+    // model relative to the controller. That needs a whole number of substeps.
+    const double physics_rate = config.sim.physics_rate.value;
+    const double ratio = physics_rate / rate;
+    const int substeps = static_cast<int>(std::lround(ratio));
+    if (substeps < 1 || std::abs(ratio - substeps) > 1e-9 * ratio) {
+      std::cerr << "--rate " << rate << " must divide sim.physics_rate (" << physics_rate
+                << " Hz) into a whole number of physics steps\n";
+      return 2;
+    }
+    const double dt_phys = 1.0 / physics_rate;
+    const auto tick = std::chrono::duration<double>(1.0 / rate);
+
     fdt::msp::MspClient msp(host, fdt::sitl::kPortConfiguratorTcp);
     std::cout << "SITL     : " << msp.fcVariant() << " " << msp.fcVersion() << "\n";
     std::cout << "arming   : blocked by [" << describeArmingFlags(msp.armingDisableFlags()) << "]\n";
@@ -154,15 +168,12 @@ int main(int argc, char** argv) {
               << " -> throttle " << std::setprecision(0) << hover_us << "us\n\n";
 
     const Schedule schedule;
-    const double dt_phys = 1.0 / config.sim.physics_rate.value;
-    const int substeps = std::max(1, static_cast<int>(std::lround(config.sim.physics_rate.value / rate)));
-    const auto tick = std::chrono::duration<double>(1.0 / rate);
 
     std::ofstream csv;
     if (!out_path.empty()) {
       csv.open(out_path);
       csv << std::setprecision(7)
-          << "t,alt,vz,tilt_deg,throttle_us,armed,m_fl,m_fr,m_rl,m_rr,motor_packets\n";
+          << "t,alt,vz,tilt_deg,throttle_us,arm_switch,fc_armed,m_fl,m_fr,m_rl,m_rr,motor_packets\n";
     }
 
     std::array<double, 4> commands{};
@@ -171,8 +182,13 @@ int main(int argc, char** argv) {
     // arming was still blocked, which set ARMING_DISABLED_THROTTLE, and because
     // the switch was already on ARM_SWITCH then latched -- it will not arm
     // again until the switch is cycled. Exactly how a real quad behaves.
-    bool armed_confirmed = false;
+    bool armed_confirmed = false;  ///< Betaflight has reported ARMED at least once
     double arm_confirmed_at = -1.0;
+    // Keep asking after the arm: a mid-flight disarm (runaway takeoff, crash
+    // detection, failsafe) must fail as a disarm, not show up later as a
+    // mysterious altitude-hold error.
+    bool fc_armed = false;         ///< Betaflight's latest answer
+    double disarmed_at = -1.0;
     constexpr double ramp_seconds = 2.0;
     constexpr double kSettleAfterRampS = 5.0;  ///< climb time excluded from the score
     double last_arm_poll = -1.0;
@@ -198,7 +214,7 @@ int main(int argc, char** argv) {
 
       double throttle_us = 1000.0;
       if (armed_confirmed && arm_confirmed_at < 0.0) arm_confirmed_at = t;
-      if (armed_confirmed) {
+      if (armed_confirmed && disarmed_at < 0.0) {
         const double alt = -(quad.state().position.z() - ground_z);
         const double climb = -quad.state().velocity.z();
 
@@ -247,10 +263,17 @@ int main(int argc, char** argv) {
 
       // Ask Betaflight directly, at a low rate so the real-time loop is not
       // disturbed by a blocking MSP round trip.
-      if (want_armed && !armed_confirmed && (t - last_arm_poll) > 0.25) {
+      if (want_armed && disarmed_at < 0.0 && (t - last_arm_poll) > 0.25) {
         last_arm_poll = t;
-        armed_confirmed = msp.isArmed();
-        if (armed_confirmed) std::cout << "armed at t=" << std::fixed << std::setprecision(2) << t << "s\n";
+        fc_armed = msp.isArmed();
+        if (fc_armed && !armed_confirmed) {
+          armed_confirmed = true;
+          std::cout << "armed at t=" << std::fixed << std::setprecision(2) << t << "s\n";
+        } else if (!fc_armed && armed_confirmed) {
+          disarmed_at = t;
+          std::cout << "DISARMED by Betaflight at t=" << std::fixed << std::setprecision(2) << t
+                    << "s  blocked by [" << describeArmingFlags(msp.armingDisableFlags()) << "]\n";
+        }
       }
 
       // --- physics ---
@@ -264,7 +287,7 @@ int main(int argc, char** argv) {
 
       if (csv.is_open()) {
         csv << t << ',' << alt << ',' << -quad.state().velocity.z() << ',' << tilt << ','
-            << throttle_us << ',' << (want_armed ? 1 : 0) << ',' << commands[0] << ',' << commands[1]
+            << throttle_us << ',' << (want_armed ? 1 : 0) << ',' << (fc_armed ? 1 : 0) << ',' << commands[0] << ',' << commands[1]
             << ',' << commands[2] << ',' << commands[3] << ',' << motor_packets << '\n';
       }
 
@@ -290,6 +313,7 @@ int main(int argc, char** argv) {
     std::cout << "motor packets  : " << motor_packets << "\n";
     std::cout << "armed (MSP)    : " << (armed_confirmed ? "yes" : "NO")
               << (armed_confirmed ? "" : "  <- Betaflight never reported ARMED") << "\n";
+    if (disarmed_at >= 0.0) std::cout << "disarmed (MSP) : at t=" << disarmed_at << " s\n";
     std::cout << "motors ran     : " << (ever_armed ? "yes" : "NO") << "\n";
     std::cout << "peak altitude  : " << peak_alt << " m\n";
     std::cout << "final altitude : " << final_alt << " m  (target " << target_alt << ")\n";
@@ -308,6 +332,7 @@ int main(int argc, char** argv) {
     std::cout << "\n";
     require(motor_packets > 100, "SITL sent motor packets (the loop is closed)");
     require(armed_confirmed, "Betaflight reported ARMED (MSP flightModeFlags bit 0)");
+    require(armed_confirmed && disarmed_at < 0.0, "stayed ARMED to the end (polled over MSP)");
     require(ever_armed, "the motors actually ran");
     require(peak_alt > 0.5, "it left the ground");
     require(!hold_errors.empty(), "the hold window was actually reached");
