@@ -243,9 +243,23 @@ Roll and yaw pass straight through; **pitch comes back negated**. Note the
 matching comment on the (uncompiled) Euler path at `sitl.c:175`: "yes! pitch
 was inverted!!" — `imuSetAttitudeQuat` evidently shares that handedness.
 
-### Gyro — ROOT CAUSE FOUND: TASK_GYRO, TASK_FILTER and TASK_PID never execute
+### Gyro — RESOLVED, and now MEASURED
 
-**The gyro is not the problem. The three realtime tasks never run at all.**
+Sending 1 rad/s on one `imu_angular_velocity_rpy` axis at a time:
+
+| fdm axis | Betaflight gyro[X,Y,Z] | Result |
+|---|---|---|
+| `rpy[0]` | **+939**, 0, 0 | X → X, same sign |
+| `rpy[1]` | 0, **-939**, 0 | Y → Y, **negated** |
+| `rpy[2]` | 0, 0, **-939** | Z → Z, **negated** |
+
+Identity axis mapping; X passes through, Y and Z are negated — exactly what
+`sitl.c:142-144` says. 939 counts per rad/s confirms `GYRO_SCALE * RAD2DEG`
+(16.4 × 57.2958). **All three conventions in this section are now measured.**
+
+#### Why it read zero for so long: the realtime tasks never executed
+
+**The gyro was never the problem. The three realtime tasks did not run at all.**
 
 Betaflight's own task table, read over the CLI while SITL was streaming
 (`tasks`):
@@ -277,19 +291,61 @@ scheduled through the normal path, while GYRO/FILTER/PID are all
 `TASK_PRIORITY_REALTIME` (`fc/tasks.c:361-363`) and run **only** inside the
 `if (gyroEnabled)` block at `scheduler.c:488-533`.
 
-#### Where to pick this up
+#### The actual cause: a 50 us sleep that costs milliseconds in a VM
 
-`gyroEnabled` is set by `schedulerEnableGyro()` (`scheduler.c:801-803`), called
-from `fc/tasks.c:500-508` — but only inside `if (sensors(SENSOR_GYRO))`, the
-same block that does `setTaskEnabled(TASK_GYRO, true)`. The three tasks DO
-appear in the task list, which means that block ran and they are enabled. So
-either `gyroEnabled` is false anyway (an ordering problem between `tasksInit`
-and sensor detection), or the block is entered and the timing test at
-`scheduler.c:515` (`schedLoopRemainingCycles < schedLoopStartCycles`) is never
-satisfied.
+`gyroEnabled` was never the problem — it is true. `cliTasks` only prints tasks
+where `taskInfo.isEnabled` (`cli.c:4855-4858`), so GYRO/FILTER/PID appearing in
+the table proves `fc/tasks.c:500-508` ran, which means `schedulerEnableGyro()`
+was called. The block at `scheduler.c:488` **is** entered.
 
-The next step is to distinguish those two, which needs visibility inside the
-scheduler rather than more MSP probing.
+It is the timing test at `scheduler.c:515` that never passes, and the reason is
+`src/main/main.c:49-54`:
+
+```c
+while (true) {
+    scheduler();
+#ifdef SIMULATOR_BUILD
+    delayMicroseconds_real(50); // max rate 20kHz
+#endif
+}
+```
+
+That 50 us assumes `nanosleep` is accurate to microseconds. On the macOS host
+it costs ~64 us, which would be fine. **Inside Docker Desktop's VM it costs
+milliseconds**, pinning the loop near 300 Hz — visible in the task table as
+TASK_ACCEL achieving 224 Hz against a desired 1000 Hz.
+
+Now the arithmetic. `SCHED_START_LOOP_MIN_US = 1` (`scheduler.h:37`), so
+`schedLoopStartCycles` starts at **1** and is capped at 12 (`scheduler.c:359-361`;
+for SITL `clockMicrosToCycles` is the identity, `sitl.c:445-448`). The gyro
+period is 100 us (`target/SITL/target.h:64-65`). Each pass:
+
+- `schedLoopRemainingCycles = nextTargetCycles - now` is hugely negative,
+  because `lastTargetCycles` is only ever advanced at `scheduler.c:588`, inside
+  the branch that actually runs the tasks.
+- The gross-overrun recovery at `:498-506` pushes the target forward. Working
+  it through, the new remaining is `P - (D mod P)`, i.e. somewhere in `(0, 100]`.
+- `:515` then needs `remaining < 1` — a **1 us window in every 100 us**.
+
+With ~3 ms between passes and a VM timer that quantises them, that window is
+essentially never hit, and because `lastTargetCycles` never advances the state
+repeats forever. The tasks are enabled, due, and permanently skipped.
+
+#### The fix
+
+`docker/Dockerfile.sitl` reduces that sleep to 1 us at build time. It is the
+only modification to upstream, it is applied inside the image (the submodule
+stays pristine), and the build **fails** if the line it patches ever changes
+upstream, so it cannot silently stop applying.
+
+Measured with the patch: gyro live and correct, PID `cycleTime` 76-147 us,
+container CPU **6.3%** — the 1 us sleep still yields, so this is not a busy
+spin.
+
+This is a property of the host timer, not of Betaflight: on a Linux host where
+`nanosleep(50us)` is accurate, stock SITL would run its loop near 20 kHz and
+hit the window comfortably. It matters here because Docker is the only way to
+run SITL on this machine (section 6).
 
 #### Evidence gathered, so the next attempt does not repeat it
 

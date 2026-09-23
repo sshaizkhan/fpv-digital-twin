@@ -35,6 +35,40 @@ WORKDIR /src/betaflight
 # target blanks ARM_SDK_PREFIX at mk/mcu/SITL.mk:15, so it demands
 # arm-none-eabi-gcc even for a host build. Pointing it at any existing
 # directory takes the branch that skips the check. Not a source patch.
+# ---------------------------------------------------------------------------
+# THE ONE PATCH TO UPSTREAM, and why it is not optional here.
+#
+# src/main/main.c sleeps between scheduler passes:
+#
+#     while (true) {
+#         scheduler();
+#     #ifdef SIMULATOR_BUILD
+#         delayMicroseconds_real(50); // max rate 20kHz
+#     #endif
+#     }
+#
+# 50 us assumes a host where nanosleep is accurate to microseconds. Inside
+# Docker Desktop's VM on macOS it costs milliseconds, pinning the loop near
+# 300 Hz. Betaflight's realtime tasks -- TASK_GYRO, TASK_FILTER and TASK_PID --
+# run ONLY inside `if (gyroEnabled)` (scheduler.c:488-533) and only when the
+# scheduler is entered within SCHED_START_LOOP_MIN_US = 1 us of the gyro
+# deadline (scheduler.h:37, scheduler.c:515). At ~3 ms per pass it never lands
+# in that window, so those three tasks NEVER EXECUTE: the gyro reads a flat
+# zero and no motor packets are ever sent, while ordinary-priority tasks like
+# TASK_ACCEL keep running and make it look as though SITL is healthy.
+#
+# Measured with this patch: gyro live and correct, PID cycleTime 76-147 us.
+# Without it: gyro 0, cycleTime 0, `tasks` shows GYRO/FILTER/PID at 0 Hz.
+#
+# The `grep -q` makes the build FAIL if upstream changes that line, so the
+# patch can never silently stop applying. Full write-up:
+# docs/sitl_interface.md section 6.
+ARG SITL_LOOP_SLEEP_US=1
+RUN grep -q 'delayMicroseconds_real(50);' src/main/main.c \
+ || (echo "main.c no longer has the 50us scheduler sleep -- re-check the patch" >&2; exit 1)
+RUN sed -i "s@delayMicroseconds_real(50);@delayMicroseconds_real(${SITL_LOOP_SLEEP_US});@" src/main/main.c \
+ && grep -n 'delayMicroseconds_real' src/main/main.c
+
 RUN make TARGET=SITL ARM_SDK_DIR=/usr -j"$(nproc)" \
  && test -f obj/main/betaflight_SITL.elf
 
