@@ -228,7 +228,7 @@ Sending 9.80665 m/s² on one `imu_linear_acceleration_xyz` axis at a time:
 No axis swapping: identity mapping, all three negated, exactly as `sitl.c:136-138`
 says. 1 g = 256 counts confirmed (`ACC_SCALE`).
 
-### Attitude quaternion — MEASURED, pitch is inverted
+### Attitude quaternion — MEASURED, pitch comes back negated (correctly)
 
 Sending a 30° rotation about one axis and reading MSP_ATTITUDE:
 
@@ -239,9 +239,11 @@ Sending a 30° rotation about one axis and reading MSP_ATTITUDE:
 | +30° about fdm y | 0.0 | **-30.0** | 0.0 |
 | +30° about fdm z | 0.0 | 0.0 | **+30.0** |
 
-Roll and yaw pass straight through; **pitch comes back negated**. Note the
-matching comment on the (uncompiled) Euler path at `sitl.c:175`: "yes! pitch
-was inverted!!" — `imuSetAttitudeQuat` evidently shares that handedness.
+Roll and yaw pass straight through; **pitch comes back negated**. That is
+Betaflight's convention, not a defect: under SITL, `imuComputeRotationMatrix`
+patches `rMat[1][0]` and `rMat[2][0]` (`imu.c:162-165`, the
+`SIMULATOR_BUILD && !USE_IMU_CALC && !SET_IMU_FROM_EULER` block), which turns
+our NED/FRD quaternion into Betaflight's nose-DOWN-positive pitch. See 5d.
 
 ### Gyro — RESOLVED, and now MEASURED
 
@@ -430,38 +432,79 @@ sweep is now paced in real time.
 ## 5c. The bridge
 
 `physics/src/sitl_bridge.cpp` holds every conversion at this boundary and
-nothing else does. Derived from the measurements above:
+nothing else does. Derived from the measurements above plus Betaflight's own
+conventions (5d):
 
 | Quantity | Conversion | Why |
 |---|---|---|
-| Gyro | negate **pitch and yaw** before sending | Cancels SITL's negation (`sitl.c:142-144`) so Betaflight receives our true FRD rates. Sent raw, its rates would disagree in sign with the attitude we also send. |
-| Accelerometer | **unchanged** | SITL's own negation turns our at-rest `[0,0,-g]` into Betaflight's expected +256 on Z. |
-| Attitude | negate the quaternion's **y** component | Roll and yaw arrive correct; only pitch inverts. Betaflight's pitch is nose-up positive (`imu.c:317`), the same sense as ours. |
+| Gyro | **unchanged** | SITL's Y/Z negation (`sitl.c:142-144`) is the FRD → FLU conversion into Betaflight's body frame. |
+| Accelerometer | negate **X** only | Betaflight wants `(fx, -fy, -fz)`; SITL negates all three (`sitl.c:136-138`). At rest `[0,0,-g]` still arrives as +256 on Z. |
+| Attitude | **unchanged**, scalar first | The SITL `rMat` patch (`imu.c:162-165`) already yields Betaflight's roll, nose-down pitch and compass heading. |
 | Position, velocity | **unchanged** | Both are NED already (`target.h:260-261`). |
 | Motors | undo SITL's slot permutation, then `betaflight_order` | Two separate mappings, both must be right. |
 | RC | microseconds, AETR then AUX1-4 | `readRCSITL` returns them unscaled (`sitl.c:228-232`). |
 
 Verified end to end by `fdt_sitl_probe`, which drives the real conversions and
-reads back over MSP:
+reads back over MSP. It exits non-zero if any check drifts, so it is a
+regression check rather than a one-off observation. Output: see 5d.
+
+### Correction (after 45a5406)
+
+The first version of the bridge negated gyro pitch and yaw and the quaternion's
+y component, and sent the accelerometer unchanged. It assumed Betaflight's pitch
+is nose-up positive (from `imu.c:317` alone) and that its gyro frame is FRD.
+Both are wrong. The probe passed anyway, because its expected values encoded
+the same assumption. The measurements in 5a were right; only their
+interpretation was wrong. Under that version pitch and yaw rate feedback would
+have been positive, and acc X was inverted.
+
+## 5d. Betaflight's own conventions — READ FROM SOURCE
+
+A measurement only says what SITL does to our numbers. What Betaflight counts
+as correct comes from the sign of the setpoint each stick produces, since the
+rate PID drives the gyro toward it:
+
+| Stick | `rcCommand` | So Betaflight's |
+|---|---|---|
+| roll right | positive (`rc.c:698`) | +gyro X = roll right |
+| pitch forward (nose down) | positive (`rc.c:698`) | +gyro Y = nose **down** |
+| yaw right | **negative** (`rc.c:705`) | +gyro Z = yaw **left** |
+
+That is a right-handed FLU body frame (x forward, y left, z up). The
+accelerometer shares it, so a level FC reads +1 g on Z, a nose-down tilt reads
+negative X, and right-wing-down reads positive Y.
+
+Attitude: angle mode drives `attitude.raw` toward a target that is positive on
+forward stick (`pid.c:387-395`), so **pitch is nose-down positive**. Roll is
+right positive, yaw is a 0-360 compass heading.
+
+`fdt_sitl_probe` checks the bridge against these, not against the raw
+measurements:
 
 ```
-OK   attitude pitch, nose up 30 deg                 30.0  want 30.0
+OK   attitude pitch, nose up 30 deg                -30.0  want -30.0
 OK   gyro X, right roll 2 rad/s                   1879.0  want 1879.3
-OK   gyro Y, nose-up pitch 3 rad/s                2818.0  want 2819.0
+OK   gyro Y, nose-up pitch 3 rad/s               -2818.0  want -2819.0
+OK   gyro Z, yaw right 1 rad/s                    -939.0  want -939.7
+OK   combined: roll right 25                        25.0  want 25.0
+OK   combined: nose up 15                          -15.0  want -15.0
+OK   combined: heading 250                         250.0  want 250.0
 OK   acc Z at rest (1 g = 256)                     256.0  want 256.0
+OK   acc X, nose down 20 at rest                   -87.0  want -87.6
+OK   acc Y, right wing down 20 at rest              82.0  want 82.3
 ```
-
-The probe exits non-zero if any of those drift, so it is a regression check
-rather than a one-off observation.
 
 ## 5b. Still UNVERIFIED — settle empirically against a running SITL
 
 These cannot be read off cleanly, and guessing them is how the sim ends up
 plausible but wrong. Each gets a test that fails on a sign or index swap.
 
-1. ~~Gyro axis mapping and signs~~ — **DONE**, section 5a.
-2. ~~Accelerometer semantics~~ — **DONE**: specific force, body FRD, section 5a.
-3. ~~Quaternion convention~~ — **DONE**, section 5a.
+1. ~~Gyro axis mapping and signs~~ — **DONE**, sections 5a and 5d.
+2. ~~Accelerometer semantics~~ — **DONE**: specific force; Betaflight wants it
+   in FLU, sections 5a and 5d. The FLU claim for acc rests on it sharing the
+   gyro's frame; the probe's tilted-at-rest checks confirm the X and Y signs.
+3. ~~Quaternion convention~~ — **DONE**, sections 5a and 5d, including a
+   combined roll/pitch/yaw attitude.
 4. **Betaflight motor index → physical position** for `mixer QUADX` at 4.5.1,
    which is still unread and is what `motors.betaflight_order` in
    `config/quad.yaml` is flagged `verified: false` for. Combine with the §4.1

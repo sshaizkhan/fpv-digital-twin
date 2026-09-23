@@ -386,14 +386,10 @@ int main(int argc, char** argv) {
       if (!ok) ++failures;
     };
 
-    {
-      // Nose up 30 degrees, pitching further up at 3 rad/s, right roll 2 rad/s.
-      fdt::State s;
-      const double a = 30.0 / kRadToDeg;
-      s.orientation = Eigen::Quaterniond(Eigen::AngleAxisd(a, Eigen::Vector3d::UnitY()));
-      s.angular_velocity = Eigen::Vector3d(2.0, 3.0, 0.0);
+    // Hold a physical state through the real conversions long enough for
+    // Betaflight's filters to settle.
+    auto hold = [&](const fdt::State& s) {
       const Eigen::Vector3d specific_force = fdt::specificForceBody(s, Eigen::Vector3d::Zero());
-
       const auto until = std::chrono::steady_clock::now() + 600ms;
       while (std::chrono::steady_clock::now() < until) {
         clock += 0.001;
@@ -402,32 +398,69 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(1ms);
         link.drainMotors();
       }
+    };
+
+    // Our NED/FRD attitude from ZYX Euler angles in degrees.
+    auto euler = [](double roll, double pitch, double yaw) {
+      return Eigen::Quaterniond(Eigen::AngleAxisd(yaw / kRadToDeg, Eigen::Vector3d::UnitZ()) *
+                                Eigen::AngleAxisd(pitch / kRadToDeg, Eigen::Vector3d::UnitY()) *
+                                Eigen::AngleAxisd(roll / kRadToDeg, Eigen::Vector3d::UnitX()));
+    };
+
+    // What "correct" means is Betaflight's own convention, read from the
+    // sign of the setpoint each stick produces (rc.c:691-709, pid.c:387-395):
+    // FLU body, +gyro Y is nose DOWN, +gyro Z is yaw LEFT, attitude pitch is
+    // nose-DOWN positive, yaw is a compass heading.
+    const double counts_per_rad = 16.4 * kRadToDeg;
+    {
+      // Nose up 30 degrees, pitching further up at 3 rad/s, right roll 2 rad/s,
+      // yawing right at 1 rad/s.
+      fdt::State s;
+      s.orientation = euler(0.0, 30.0, 0.0);
+      s.angular_velocity = Eigen::Vector3d(2.0, 3.0, 1.0);
+      hold(s);
 
       const fdt::msp::Attitude att = msp.attitude();
       const fdt::msp::RawImu imu = msp.rawImu();
-      const double counts_per_rad = 16.4 * kRadToDeg;
-
-      check("attitude pitch, nose up 30 deg", att.pitch_deg, 30.0, 2.0);
+      check("attitude pitch, nose up 30 deg", att.pitch_deg, -30.0, 2.0);
       check("attitude roll, level", att.roll_deg, 0.0, 2.0);
       check("gyro X, right roll 2 rad/s", imu.gyro[0], 2.0 * counts_per_rad, 60.0);
-      check("gyro Y, nose-up pitch 3 rad/s", imu.gyro[1], 3.0 * counts_per_rad, 60.0);
+      check("gyro Y, nose-up pitch 3 rad/s", imu.gyro[1], -3.0 * counts_per_rad, 60.0);
+      check("gyro Z, yaw right 1 rad/s", imu.gyro[2], -1.0 * counts_per_rad, 60.0);
+    }
+    {
+      // Combined attitude: a single-axis case cannot tell a frame change from
+      // a per-component sign hack.
+      fdt::State s;
+      s.orientation = euler(25.0, 15.0, 250.0);
+      hold(s);
+      const fdt::msp::Attitude att = msp.attitude();
+      check("combined: roll right 25", att.roll_deg, 25.0, 2.0);
+      check("combined: nose up 15", att.pitch_deg, -15.0, 2.0);
+      check("combined: heading 250", att.yaw_deg, 250.0, 2.0);
     }
     {
       // Level and at rest: a real FC reads +1 g on Z and nothing else.
       fdt::State s;
-      const Eigen::Vector3d specific_force = fdt::specificForceBody(s, Eigen::Vector3d::Zero());
-      const auto until = std::chrono::steady_clock::now() + 600ms;
-      while (std::chrono::steady_clock::now() < until) {
-        clock += 0.001;
-        link.sendState(fdt::sitl::toFdmPacket(s, specific_force, clock));
-        link.sendRc(fdt::sitl::toRcPacket(fdt::sitl::RcChannels::neutral(), clock));
-        std::this_thread::sleep_for(1ms);
-        link.drainMotors();
-      }
+      hold(s);
       const fdt::msp::RawImu imu = msp.rawImu();
       check("acc Z at rest (1 g = 256)", imu.acc[2], 256.0, 12.0);
       check("acc X at rest", imu.acc[0], 0.0, 12.0);
       check("gyro at rest, X", imu.gyro[0], 0.0, 30.0);
+    }
+    {
+      // At rest, nose down 20 and right wing down 20: gravity's reaction leans
+      // toward the tail (-X) and the raised left wing (+Y) in Betaflight's FLU.
+      fdt::State s;
+      s.orientation = euler(20.0, -20.0, 0.0);
+      hold(s);
+      const Eigen::Vector3d f = fdt::specificForceBody(s, Eigen::Vector3d::Zero());
+      const fdt::msp::RawImu imu = msp.rawImu();
+      const double counts_per_ms2 = 256.0 / kG;
+      check("acc X, nose down 20 at rest", imu.acc[0], f.x() * counts_per_ms2, 12.0);
+      check("acc Y, right wing down 20 at rest", imu.acc[1], -f.y() * counts_per_ms2, 12.0);
+      check("acc X is negative nose down", imu.acc[0] < 0.0 ? 1.0 : 0.0, 1.0, 0.0);
+      check("acc Y is positive right wing down", imu.acc[1] > 0.0 ? 1.0 : 0.0, 1.0, 0.0);
     }
 
     if (failures == 0) {

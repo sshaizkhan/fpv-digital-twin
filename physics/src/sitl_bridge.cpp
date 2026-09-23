@@ -36,23 +36,28 @@ uint16_t RcChannels::aux(size_t aux_index) const {
 // --- conversions ------------------------------------------------------------
 
 Eigen::Vector3d gyroToSitl(const Eigen::Vector3d& body_rates) {
-  // SITL negates Y and Z (sitl.c:142-144). Pre-negate so Betaflight ends up
-  // with our true FRD rates rather than a pitch/yaw-mirrored world that
-  // disagrees with the attitude quaternion we also send.
-  return {body_rates.x(), -body_rates.y(), -body_rates.z()};
+  // Sent unchanged. SITL's own Y/Z negation (sitl.c:142-144) is the FRD ->
+  // FLU conversion into Betaflight's body frame, where +Y is nose DOWN and +Z
+  // is yaw LEFT (rc.c:691-709: forward pitch stick and left yaw stick both
+  // produce positive setpoints). Cancelling it would invert both rate loops.
+  return body_rates;
 }
 
 Eigen::Vector3d accelToSitl(const Eigen::Vector3d& specific_force_body) {
-  // Sent unchanged. SITL negates all three (sitl.c:136-138), which turns our
-  // at-rest [0, 0, -g] into Betaflight's expected +256 on Z. Measured.
-  return specific_force_body;
+  // Betaflight's accel shares its gyro's FLU frame, so it wants
+  // (fx, -fy, -fz) of our FRD specific force. SITL negates all three
+  // (sitl.c:136-138), so pre-negate X only. At rest [0, 0, -g] still arrives
+  // as +256 on Z; a nose-down tilt now reads negative on X, as on a real FC.
+  return {-specific_force_body.x(), specific_force_body.y(), specific_force_body.z()};
 }
 
 std::array<double, 4> attitudeToSitl(const Eigen::Quaterniond& q_wb) {
-  // Scalar first, and the y component negated: measured, +30 deg about our
-  // body y otherwise arrives as -30 deg of Betaflight pitch (imu.c:317 defines
-  // its pitch as nose-up positive, the same sense as ours).
-  return {q_wb.w(), q_wb.x(), -q_wb.y(), q_wb.z()};
+  // Sent unchanged, scalar first. Under SITL imuComputeRotationMatrix patches
+  // rMat[1][0] and rMat[2][0] (imu.c:162-165), so our NED/FRD q_wb comes out
+  // as roll = ours, pitch = -ours (Betaflight's pitch is nose-DOWN positive:
+  // pid.c:387-395 drives it toward a positive target on forward stick), and
+  // yaw = our heading. That is already Betaflight's convention.
+  return {q_wb.w(), q_wb.x(), q_wb.y(), q_wb.z()};
 }
 
 FdmPacket toFdmPacket(const State& state, const Eigen::Vector3d& specific_force_body,

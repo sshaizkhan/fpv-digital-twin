@@ -6,6 +6,7 @@
 // SITL (docs/sitl_interface.md section 5a) rather than against a re-derivation
 // of the same reasoning the code uses.
 
+#include "fdt/imu.hpp"
 #include "fdt/sitl_bridge.hpp"
 
 #include <gtest/gtest.h>
@@ -17,8 +18,7 @@ namespace {
 
 fdt::QuadConfig config() { return fdt::loadQuadConfig(std::string(FDT_REPO_ROOT) + "/config/quad.yaml"); }
 
-/// What SITL does to a gyro value, transcribed from sitl.c:142-144. Applying
-/// this to what we send must reproduce what Betaflight was measured to read.
+/// What SITL does to a gyro value, transcribed from sitl.c:142-144.
 Eigen::Vector3d sitlGyroTransform(const Eigen::Vector3d& sent) {
   return {sent.x(), -sent.y(), -sent.z()};
 }
@@ -26,21 +26,67 @@ Eigen::Vector3d sitlGyroTransform(const Eigen::Vector3d& sent) {
 /// sitl.c:136-138 -- all three negated.
 Eigen::Vector3d sitlAccelTransform(const Eigen::Vector3d& sent) { return -sent; }
 
+/// Betaflight attitude in degrees, as MSP_ATTITUDE would report it.
+struct BfAttitude {
+  double roll, pitch, yaw;
+};
+
+/// What Betaflight does with the packet quaternion under SITL, transcribed
+/// from imuSetAttitudeQuat (imu.c:777), imuComputeRotationMatrix including its
+/// SIMULATOR_BUILD patch (imu.c:146-165), and imuUpdateEulerAngles
+/// (imu.c:310-323). Independent of the bridge's reasoning: it is Betaflight's
+/// code, so the bridge output run through it must yield Betaflight's own
+/// convention for the attitude we mean.
+BfAttitude betaflightEuler(const std::array<double, 4>& q) {
+  const double w = q[0], x = q[1], y = q[2], z = q[3];
+  const double r00 = 1.0 - 2.0 * y * y - 2.0 * z * z;
+  const double r10 = -2.0 * (x * y + w * z);  // SIMULATOR_BUILD patch
+  const double r20 = -2.0 * (x * z - w * y);  // SIMULATOR_BUILD patch
+  const double r21 = 2.0 * (y * z + w * x);
+  const double r22 = 1.0 - 2.0 * x * x - 2.0 * y * y;
+  constexpr double kDeg = 180.0 / M_PI;
+  BfAttitude a{};
+  a.roll = std::atan2(r21, r22) * kDeg;
+  a.pitch = (M_PI / 2.0 - std::acos(-r20)) * kDeg;
+  a.yaw = -std::atan2(r10, r00) * kDeg;
+  if (a.yaw < 0.0) a.yaw += 360.0;
+  return a;
+}
+
+/// Our NED/FRD attitude from ZYX Euler angles (yaw, then pitch, then roll).
+Eigen::Quaterniond fromEuler(double roll_deg, double pitch_deg, double yaw_deg) {
+  const double d = M_PI / 180.0;
+  return Eigen::AngleAxisd(yaw_deg * d, Eigen::Vector3d::UnitZ()) *
+         Eigen::AngleAxisd(pitch_deg * d, Eigen::Vector3d::UnitY()) *
+         Eigen::AngleAxisd(roll_deg * d, Eigen::Vector3d::UnitX());
+}
+
 constexpr double kGyroCountsPerRadPerSec = 16.4 * 180.0 / M_PI;  // ~939.7
 constexpr double kAccCountsPerG = 256.0;
+
+Eigen::Vector3d sentGyro(const fdt::sitl::FdmPacket& p) {
+  return {p.imu_angular_velocity_rpy[0], p.imu_angular_velocity_rpy[1], p.imu_angular_velocity_rpy[2]};
+}
+
+Eigen::Vector3d sentAccel(const fdt::sitl::FdmPacket& p) {
+  return {p.imu_linear_acceleration_xyz[0], p.imu_linear_acceleration_xyz[1],
+          p.imu_linear_acceleration_xyz[2]};
+}
 
 }  // namespace
 
 // --- gyro ------------------------------------------------------------------
+//
+// Betaflight's body frame is FLU. The rate PID drives the gyro toward the
+// setpoint, so the sign each stick produces fixes the sign of each axis:
+// forward pitch stick -> positive rcCommand (rc.c:698) and forward stick means
+// nose down, so +Y is nose DOWN; right yaw stick -> negative rcCommand
+// (rc.c:705), so +Z is yaw LEFT.
 
-TEST(SitlBridge, GyroReachesBetaflightAsOurTrueBodyRates) {
-  // The whole point of the pre-negation: after SITL's transform, Betaflight
-  // must see exactly the rates we have, not a mirrored version.
+TEST(SitlBridge, GyroIsSentUnchanged) {
   const Eigen::Vector3d rates(1.5, -2.5, 0.75);
-  const Eigen::Vector3d at_betaflight = sitlGyroTransform(fdt::sitl::gyroToSitl(rates));
-  EXPECT_TRUE(at_betaflight.isApprox(rates, 1e-15))
-      << "sent " << fdt::sitl::gyroToSitl(rates).transpose() << ", Betaflight would see "
-      << at_betaflight.transpose() << ", we have " << rates.transpose();
+  EXPECT_TRUE(fdt::sitl::gyroToSitl(rates).isApprox(rates, 1e-15))
+      << "SITL's own Y/Z negation is the FRD -> FLU conversion; do not cancel it";
 }
 
 TEST(SitlBridge, GyroPerAxisSignsMatchTheMeasurement) {
@@ -65,66 +111,75 @@ TEST(SitlBridge, GyroPerAxisSignsMatchTheMeasurement) {
   }
 }
 
-TEST(SitlBridge, PositiveRollRateArrivesPositiveAtBetaflight) {
-  // p > 0 is roll right (docs/coordinate_frames.md §4). Betaflight must agree,
-  // or the roll PID drives the wrong way.
+TEST(SitlBridge, RollRightArrivesPositiveAtBetaflight) {
+  // p > 0 is roll right (docs/coordinate_frames.md §4); right roll stick is a
+  // positive setpoint in Betaflight.
   fdt::State s;
   s.angular_velocity = Eigen::Vector3d(4.0, 0.0, 0.0);
   const auto packet = fdt::sitl::toFdmPacket(s, Eigen::Vector3d(0, 0, -fdt::kGravity), 1.0);
-
-  const Eigen::Vector3d sent(packet.imu_angular_velocity_rpy[0], packet.imu_angular_velocity_rpy[1],
-                             packet.imu_angular_velocity_rpy[2]);
-  EXPECT_GT(sitlGyroTransform(sent).x(), 0.0) << "right roll must reach Betaflight as positive X";
+  EXPECT_GT(sitlGyroTransform(sentGyro(packet)).x(), 0.0);
 }
 
-TEST(SitlBridge, NoseUpPitchRateArrivesPositiveAtBetaflight) {
-  // q > 0 is nose up for us, and Betaflight's pitch is nose-up positive too
-  // (imu.c:317). Sent raw this arrives inverted, which is why gyroToSitl
-  // negates it.
+TEST(SitlBridge, NoseUpArrivesNegativeAtBetaflight) {
+  // q > 0 is nose up for us. Betaflight's +Y is nose DOWN (forward stick is a
+  // positive setpoint), so nose up must arrive negative or the pitch loop is
+  // positive feedback.
   fdt::State s;
   s.angular_velocity = Eigen::Vector3d(0.0, 3.0, 0.0);
   const auto packet = fdt::sitl::toFdmPacket(s, Eigen::Vector3d(0, 0, -fdt::kGravity), 1.0);
-
-  const Eigen::Vector3d sent(packet.imu_angular_velocity_rpy[0], packet.imu_angular_velocity_rpy[1],
-                             packet.imu_angular_velocity_rpy[2]);
-  EXPECT_LT(sent.y(), 0.0) << "must be pre-negated on the wire";
-  EXPECT_GT(sitlGyroTransform(sent).y(), 0.0) << "so Betaflight sees nose-up as positive";
+  EXPECT_LT(sitlGyroTransform(sentGyro(packet)).y(), 0.0);
 }
 
-TEST(SitlBridge, YawRightRateArrivesPositiveAtBetaflight) {
+TEST(SitlBridge, YawRightArrivesNegativeAtBetaflight) {
+  // r > 0 is yaw right for us. Right yaw stick is a NEGATIVE setpoint in
+  // Betaflight (rc.c:705), so yaw right must arrive negative.
   fdt::State s;
-  s.angular_velocity = Eigen::Vector3d(0.0, 0.0, 2.0);  // r > 0 is yaw right
+  s.angular_velocity = Eigen::Vector3d(0.0, 0.0, 2.0);
   const auto packet = fdt::sitl::toFdmPacket(s, Eigen::Vector3d(0, 0, -fdt::kGravity), 1.0);
-
-  const Eigen::Vector3d sent(packet.imu_angular_velocity_rpy[0], packet.imu_angular_velocity_rpy[1],
-                             packet.imu_angular_velocity_rpy[2]);
-  EXPECT_LT(sent.z(), 0.0);
-  EXPECT_GT(sitlGyroTransform(sent).z(), 0.0) << "Betaflight must see yaw-right as positive Z";
+  EXPECT_LT(sitlGyroTransform(sentGyro(packet)).z(), 0.0);
 }
 
 // --- accelerometer ---------------------------------------------------------
+//
+// Betaflight's accel shares its gyro's FLU frame: it expects (fx, -fy, -fz)
+// of our FRD specific force.
 
 TEST(SitlBridge, RestingQuadReadsPlusOneGOnZAtBetaflight) {
-  // The single most checkable fact at this boundary, and it was measured:
-  // our [0, 0, -9.80665] arrives as +256 counts on Z, which is what a real
-  // level FC reads.
+  // Measured: a level FC reads +256 counts on Z.
   fdt::State s;
-  const Eigen::Vector3d at_rest(0.0, 0.0, -fdt::kGravity);
-  const auto packet = fdt::sitl::toFdmPacket(s, at_rest, 1.0);
-
-  const Eigen::Vector3d sent(packet.imu_linear_acceleration_xyz[0], packet.imu_linear_acceleration_xyz[1],
-                             packet.imu_linear_acceleration_xyz[2]);
-  const Eigen::Vector3d counts = sitlAccelTransform(sent) * (kAccCountsPerG / fdt::kGravity);
+  const auto packet = fdt::sitl::toFdmPacket(s, Eigen::Vector3d(0.0, 0.0, -fdt::kGravity), 1.0);
+  const Eigen::Vector3d counts = sitlAccelTransform(sentAccel(packet)) * (kAccCountsPerG / fdt::kGravity);
 
   EXPECT_NEAR(counts.z(), +256.0, 0.5) << "a level FC reads +1 g on Z";
   EXPECT_NEAR(counts.x(), 0.0, 0.5);
   EXPECT_NEAR(counts.y(), 0.0, 0.5);
 }
 
-TEST(SitlBridge, AccelerometerIsSentUnchanged) {
-  const Eigen::Vector3d f(1.0, -2.0, -9.0);
-  EXPECT_TRUE(fdt::sitl::accelToSitl(f).isApprox(f, 1e-15))
-      << "SITL's own negation is what produces Betaflight's expected reading";
+TEST(SitlBridge, NoseDownAtRestReadsNegativeXAtBetaflight) {
+  // Tilted nose down by 20 deg, at rest. Gravity then has a component along
+  // the nose, and in FLU the specific force is (-g sin, 0, g cos): X negative.
+  fdt::State s;
+  s.orientation = fromEuler(0.0, -20.0, 0.0);
+  const Eigen::Vector3d f = fdt::specificForceBody(s, Eigen::Vector3d::Zero());
+  ASSERT_LT(f.x(), 0.0) << "our FRD specific force is also -g sin on X";
+
+  const auto packet = fdt::sitl::toFdmPacket(s, f, 1.0);
+  const Eigen::Vector3d counts = sitlAccelTransform(sentAccel(packet)) * (kAccCountsPerG / fdt::kGravity);
+  const double expected = -256.0 * std::sin(20.0 * M_PI / 180.0);
+  EXPECT_NEAR(counts.x(), expected, 0.5) << "nose down must read negative X, as on a real FC";
+  EXPECT_GT(counts.z(), 0.0);
+}
+
+TEST(SitlBridge, RightWingDownAtRestReadsPositiveYAtBetaflight) {
+  // Rolled right 20 deg, at rest. Specific force points world-up, which now
+  // leans toward the raised left wing: +Y in FLU, (0, +g sin, g cos).
+  fdt::State s;
+  s.orientation = fromEuler(20.0, 0.0, 0.0);
+  const Eigen::Vector3d f = fdt::specificForceBody(s, Eigen::Vector3d::Zero());
+
+  const auto packet = fdt::sitl::toFdmPacket(s, f, 1.0);
+  const Eigen::Vector3d counts = sitlAccelTransform(sentAccel(packet)) * (kAccCountsPerG / fdt::kGravity);
+  EXPECT_NEAR(counts.y(), +256.0 * std::sin(20.0 * M_PI / 180.0), 0.5);
 }
 
 TEST(SitlBridge, FreeFallReadsZeroAtBetaflight) {
@@ -134,27 +189,38 @@ TEST(SitlBridge, FreeFallReadsZeroAtBetaflight) {
 }
 
 // --- attitude --------------------------------------------------------------
+//
+// Betaflight reports roll right positive, pitch nose DOWN positive (angle mode
+// drives attitude toward a positive target on forward stick, pid.c:387-395),
+// and yaw as a 0-360 compass heading.
 
-TEST(SitlBridge, AttitudeIsScalarFirst) {
-  Eigen::Quaterniond q(0.5, 0.5, 0.5, 0.5);  // Eigen ctor is (w, x, y, z)
+TEST(SitlBridge, AttitudeIsSentUnchangedScalarFirst) {
+  const Eigen::Quaterniond q = fromEuler(10.0, -20.0, 30.0);
   const auto out = fdt::sitl::attitudeToSitl(q);
   EXPECT_DOUBLE_EQ(out[0], q.w()) << "target.h:259 says w, x, y, z";
+  EXPECT_DOUBLE_EQ(out[1], q.x());
+  EXPECT_DOUBLE_EQ(out[2], q.y());
+  EXPECT_DOUBLE_EQ(out[3], q.z());
 }
 
-TEST(SitlBridge, PitchIsNegatedButRollAndYawAreNot) {
+TEST(SitlBridge, SingleAxisAttitudesMatchTheMeasurement) {
   // Measured: +30 deg about fdm x -> BF roll +30; about y -> BF pitch -30;
-  // about z -> BF yaw +30. Only pitch needs correcting.
-  const double a = 30.0 * M_PI / 180.0;
-  const double s = std::sin(a / 2.0);
+  // about z -> BF yaw +30. Checks the imu.c transcription against reality.
+  const BfAttitude roll = betaflightEuler(fdt::sitl::attitudeToSitl(fromEuler(30.0, 0.0, 0.0)));
+  const BfAttitude pitch = betaflightEuler(fdt::sitl::attitudeToSitl(fromEuler(0.0, 30.0, 0.0)));
+  const BfAttitude yaw = betaflightEuler(fdt::sitl::attitudeToSitl(fromEuler(0.0, 0.0, 30.0)));
+  EXPECT_NEAR(roll.roll, +30.0, 1e-9);
+  EXPECT_NEAR(pitch.pitch, -30.0, 1e-9) << "nose up is negative in Betaflight";
+  EXPECT_NEAR(yaw.yaw, +30.0, 1e-9);
+}
 
-  const auto roll = fdt::sitl::attitudeToSitl(Eigen::Quaterniond(std::cos(a / 2), s, 0, 0));
-  EXPECT_NEAR(roll[1], +s, 1e-15) << "roll passes through";
-
-  const auto pitch = fdt::sitl::attitudeToSitl(Eigen::Quaterniond(std::cos(a / 2), 0, s, 0));
-  EXPECT_NEAR(pitch[2], -s, 1e-15) << "pitch must be negated or Betaflight reads it upside down";
-
-  const auto yaw = fdt::sitl::attitudeToSitl(Eigen::Quaterniond(std::cos(a / 2), 0, 0, s));
-  EXPECT_NEAR(yaw[3], +s, 1e-15) << "yaw passes through";
+TEST(SitlBridge, CombinedAttitudeArrivesInBetaflightConvention) {
+  // Single-axis cases cannot tell a real frame change from a component hack.
+  // Roll right 25, nose up 15, heading 250.
+  const BfAttitude a = betaflightEuler(fdt::sitl::attitudeToSitl(fromEuler(25.0, 15.0, 250.0)));
+  EXPECT_NEAR(a.roll, 25.0, 1e-9);
+  EXPECT_NEAR(a.pitch, -15.0, 1e-9) << "nose up is negative in Betaflight";
+  EXPECT_NEAR(a.yaw, 250.0, 1e-9);
 }
 
 TEST(SitlBridge, AttitudeStaysAUnitQuaternion) {

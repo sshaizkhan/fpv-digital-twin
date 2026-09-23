@@ -70,8 +70,9 @@ above. The resulting senses are:
 Derivation for `q`, since the FRD down-axis trips people up: `ω = ŷ`, nose point
 `r = x̂`, velocity `ω × r = ŷ × x̂ = -ẑ`, and `-z` is up. Nose up. ✅
 
-This matches the intuitive stick sense (right stick right → `p > 0`). Whether
-Betaflight's SITL gyro packet uses the same signs is **UNVERIFIED** — see §7.
+This matches the intuitive stick sense (right stick right → `p > 0`). The SITL
+gyro packet takes these rates as-is; Betaflight itself is FLU (+Y nose down,
++Z yaw left) and SITL does that conversion. See [`sitl_interface.md`](sitl_interface.md) 5c-5d.
 
 ## 5. Motors (DEFINED, except ordering)
 

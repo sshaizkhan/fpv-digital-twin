@@ -62,29 +62,31 @@ struct RcChannels {
 //             +30 deg about fdm y -> BF pitch -30   <-- inverted
 //             +30 deg about fdm z -> BF yaw   +30
 //
-// Betaflight's own conventions, so we know what "correct" is:
+// Betaflight's own conventions, so we know what "correct" is. Its body frame
+// is FLU (x forward, y left, z up), read off the sign of the setpoint each
+// stick produces, since the rate PID drives the gyro toward it:
 //
-//   attitude.values.pitch = asin(-rMat[2][0]) (imu.c:317), i.e. positive is
-//   NOSE UP, the aerospace sense, matching ours.
+//   roll  stick right   -> positive rcCommand (rc.c:698)  -> +X is roll right
+//   pitch stick forward -> positive rcCommand (rc.c:698)  -> +Y is nose DOWN
+//   yaw   stick right   -> negative rcCommand (rc.c:705)  -> +Z is yaw LEFT
 //
-// Therefore:
+//   attitude pitch is positive nose DOWN: angle mode drives attitude.raw toward
+//   a target that is positive on forward stick (pid.c:387-395). Under SITL,
+//   imuComputeRotationMatrix patches rMat[1][0] and rMat[2][0] (imu.c:162-165),
+//   which is what produces the measured pitch inversion above.
 //
-//   * Accelerometer: send our FRD specific force unchanged. At rest ours is
-//     [0, 0, -9.80665]; SITL negates it to +9.80665 on Z and scales by
-//     256/9.80665, so Betaflight reads +256 on Z -- exactly what a real level
-//     FC reads. VERIFIED by measurement.
+// Therefore, from our FRD frame:
 //
-//   * Gyro: negate pitch and yaw before sending, cancelling SITL's negation so
-//     Betaflight receives our true FRD body rates. Sent raw, Betaflight would
-//     see pitch and yaw rates inverted relative to the attitude it is given.
+//   * Gyro: send unchanged. SITL's Y/Z negation IS the FRD -> FLU conversion.
 //
-//   * Attitude: negate the quaternion's y component. Roll and yaw arrive
-//     correct; only pitch inverts, and this is the minimal correction that
-//     fixes it without disturbing the other two.
+//   * Accelerometer: negate X only. Betaflight wants (fx, -fy, -fz); SITL
+//     negates all three. At rest [0, 0, -g] arrives as +256 on Z.
 //
-// The pitch and yaw corrections are the load-bearing ones. If either is wrong
-// the quad will diverge the instant a closed loop runs, which is precisely what
-// the Phase 2 scripted hover is for.
+//   * Attitude: send q_wb unchanged. The patched rMat already turns it into
+//     Betaflight's roll, nose-down pitch, and compass yaw.
+//
+// A sign error in gyro pitch or yaw makes that rate loop positive feedback,
+// which the Phase 2 scripted hover would show as immediate divergence.
 
 /// Body rates (rad/s, our FRD frame) as SITL's `imu_angular_velocity_rpy`.
 Eigen::Vector3d gyroToSitl(const Eigen::Vector3d& body_rates);
