@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fpv-digital-twin viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0b0d10; color: #e6e9ef;
+         font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; }
+  #scene { position: fixed; inset: 0; }
+  .panel { position: fixed; background: rgba(14,17,22,.86); border: 1px solid #262d38;
+           border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(6px); }
+  #hud { top: 12px; left: 12px; min-width: 232px; }
+  #hud h1 { margin: 0 0 8px; font-size: 12px; letter-spacing: .08em;
+            text-transform: uppercase; color: #7d8795; font-weight: 600; }
+  .row { display: flex; justify-content: space-between; gap: 16px; padding: 1px 0; }
+  .row span:first-child { color: #7d8795; }
+  .val { font-variant-numeric: tabular-nums; }
+  #status { margin-top: 9px; padding-top: 9px; border-top: 1px solid #262d38;
+            display: flex; align-items: center; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #444c58; flex: none; }
+  .dot.on { background: #3fb950; box-shadow: 0 0 9px #3fb950aa; }
+  .dot.armed { background: #f85149; box-shadow: 0 0 9px #f85149aa; }
+  #help { bottom: 12px; left: 12px; color: #6e7681; font-size: 11px; }
+  #bars { top: 12px; right: 12px; width: 156px; }
+  .bar { height: 7px; background: #1c222b; border-radius: 4px; margin: 3px 0 7px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: #58a6ff; transition: width .05s linear; }
+  kbd { background: #1c222b; border: 1px solid #30363d; border-radius: 3px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<div id="scene"></div>
+
+<div id="hud" class="panel">
+  <h1>fpv digital twin</h1>
+  <div class="row"><span>alt</span><span class="val" id="alt">—</span></div>
+  <div class="row"><span>speed</span><span class="val" id="spd">—</span></div>
+  <div class="row"><span>roll</span><span class="val" id="roll">—</span></div>
+  <div class="row"><span>pitch</span><span class="val" id="pitch">—</span></div>
+  <div class="row"><span>yaw</span><span class="val" id="yaw">—</span></div>
+  <div class="row"><span>battery</span><span class="val" id="vbat">—</span></div>
+  <div class="row"><span>throttle</span><span class="val" id="thr">—</span></div>
+  <div class="row"><span>rate</span><span class="val" id="hz">—</span></div>
+  <div id="status">
+    <span class="dot" id="linkdot"></span><span id="link">waiting for bridge</span>
+  </div>
+  <div id="status" style="border:0;padding-top:4px;margin-top:4px">
+    <span class="dot" id="armdot"></span><span id="armtxt">disarmed</span>
+  </div>
+</div>
+
+<div id="bars" class="panel">
+  <div style="color:#7d8795;font-size:11px;margin-bottom:4px">motors (rpm)</div>
+  <div id="motorbars"></div>
+</div>
+
+<div id="help" class="panel">
+  drag to orbit · scroll to zoom · <kbd>c</kbd> chase/orbit · <kbd>f</kbd> fpv · <kbd>r</kbd> reset
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" type="module"></script>
+<script type="module">
+import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js';
+
+// ---------------------------------------------------------------------------
+// FRAME CONVERSION. The physics speaks world NED (x North, y East, z DOWN) and
+// body FRD, with a scalar-first quaternion. Three.js is Y-up right-handed, the
+// same convention Godot uses, so this is the mapping already written down in
+// docs/coordinate_frames.md section 8:
+//
+//     three.x =  ned.y      (East  -> right)
+//     three.y = -ned.z      (Down  -> up)
+//     three.z = -ned.x      (North -> -Z forward)
+//
+// That permutation is a rotation, so the quaternion transforms by conjugation
+// with it rather than by shuffling components -- shuffling would silently
+// mirror the model.
+// ---------------------------------------------------------------------------
+const NED_TO_THREE = new THREE.Matrix4().set(
+  0, 1,  0, 0,
+  0, 0, -1, 0,
+ -1, 0,  0, 0,
+  0, 0,  0, 1);
+const NED_TO_THREE_Q = new THREE.Quaternion().setFromRotationMatrix(NED_TO_THREE);
+const NED_TO_THREE_Q_INV = NED_TO_THREE_Q.clone().invert();
+
+function posToThree(ned) {
+  return new THREE.Vector3(ned[1], -ned[2], -ned[0]);
+}
+function quatToThree(wxyz) {
+  const q = new THREE.Quaternion(wxyz[1], wxyz[2], wxyz[3], wxyz[0]); // three is (x,y,z,w)
+  return NED_TO_THREE_Q.clone().multiply(q).multiply(NED_TO_THREE_Q_INV);
+}
+
+// --- scene -----------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.getElementById('scene').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d10);
+scene.fog = new THREE.Fog(0x0b0d10, 40, 190);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.05, 600);
+const fpvCamera = new THREE.PerspectiveCamera(110, innerWidth / innerHeight, 0.02, 600);
+
+scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x14171c, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(12, 26, 9);
+scene.add(sun);
+
+const grid = new THREE.GridHelper(200, 100, 0x2a3442, 0x161c24);
+scene.add(grid);
+
+// Depth cues: without something to judge motion against, a quad in an empty
+// void looks stationary no matter what it does.
+const poleGeo = new THREE.CylinderGeometry(0.06, 0.06, 4, 8);
+const poleMat = new THREE.MeshStandardMaterial({ color: 0x3d4d61, roughness: .9 });
+for (let i = 0; i < 28; i++) {
+  const a = (i / 28) * Math.PI * 2, r = 16 + (i % 4) * 7;
+  const pole = new THREE.Mesh(poleGeo, poleMat);
+  pole.position.set(Math.cos(a) * r, 2, Math.sin(a) * r);
+  scene.add(pole);
+}
+for (let i = 0; i < 4; i++) {
+  const gate = new THREE.Mesh(
+    new THREE.TorusGeometry(1.5, 0.09, 8, 28),
+    new THREE.MeshStandardMaterial({ color: 0xf0883e, roughness: .6 }));
+  gate.position.set(Math.sin(i * 1.9) * 11, 2.2, -8 - i * 9);
+  scene.add(gate);
+}
+
+// --- the quad --------------------------------------------------------------
+// Built in OUR body frame (x forward, y right, z down) then wrapped in a node
+// that applies the NED->three rotation, so the geometry matches the docs and
+// the conversion stays in exactly one place.
+const quad = new THREE.Group();
+const body = new THREE.Group();
+quad.add(body);
+
+const armMat = new THREE.MeshStandardMaterial({ color: 0x8b949e, roughness: .55, metalness: .3 });
+const centre = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.05, 0.09), armMat);
+body.add(centre);
+
+const ARM = 0.078;  // matches motors.geometry in quad.yaml
+const MOTORS = [
+  { name: 'FL', x: +ARM, y: -ARM },
+  { name: 'FR', x: +ARM, y: +ARM },
+  { name: 'RL', x: -ARM, y: -ARM },
+  { name: 'RR', x: -ARM, y: +ARM },
+];
+const props = [];
+MOTORS.forEach((m, i) => {
+  // body FRD -> three: x fwd = -z, y right = +x, z down = -y
+  const px = m.y, pz = -m.x;
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.012, Math.hypot(m.x, m.y) * 2), armMat);
+  arm.position.set(px / 2, 0, pz / 2);
+  arm.lookAt(px, 0, pz);
+  body.add(arm);
+
+  const prop = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.0635, 0.0635, 0.004, 20),
+    new THREE.MeshStandardMaterial({
+      color: i < 2 ? 0x58a6ff : 0x8957e5, transparent: true, opacity: .55, roughness: .4 }));
+  prop.position.set(px, 0.018, pz);
+  body.add(prop);
+  props.push(prop);
+});
+// Nose marker, so orientation is unambiguous at a glance.
+const nose = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.07, 10),
+  new THREE.MeshStandardMaterial({ color: 0x3fb950 }));
+nose.rotation.x = -Math.PI / 2;
+nose.position.set(0, 0, -0.085);
+body.add(nose);
+scene.add(quad);
+
+// FPV camera rides the airframe, tilted up by the configured angle.
+const CAMERA_TILT_DEG = 30;
+const fpvMount = new THREE.Object3D();
+fpvMount.position.set(0, 0.02, -0.06);
+fpvMount.rotation.x = THREE.MathUtils.degToRad(CAMERA_TILT_DEG);
+body.add(fpvMount);
+
+const trail = new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints(new Array(600).fill(new THREE.Vector3())),
+  new THREE.LineBasicMaterial({ color: 0x3fb950, transparent: true, opacity: .55 }));
+scene.add(trail);
+const trailPoints = [];
+
+// --- camera control --------------------------------------------------------
+let mode = 'orbit';
+let orbit = { yaw: 0.6, pitch: 0.42, dist: 7 };
+let dragging = false, lastX = 0, lastY = 0;
+renderer.domElement.addEventListener('pointerdown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+addEventListener('pointerup', () => dragging = false);
+addEventListener('pointermove', e => {
+  if (!dragging) return;
+  orbit.yaw -= (e.clientX - lastX) * 0.006;
+  orbit.pitch = Math.max(-1.2, Math.min(1.35, orbit.pitch + (e.clientY - lastY) * 0.006));
+  lastX = e.clientX; lastY = e.clientY;
+});
+renderer.domElement.addEventListener('wheel', e => {
+  e.preventDefault();
+  orbit.dist = Math.max(1.2, Math.min(70, orbit.dist * (1 + Math.sign(e.deltaY) * 0.1)));
+}, { passive: false });
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'c') mode = mode === 'chase' ? 'orbit' : 'chase';
+  else if (k === 'f') mode = mode === 'fpv' ? 'orbit' : 'fpv';
+  else if (k === 'r') { orbit = { yaw: 0.6, pitch: 0.42, dist: 7 }; mode = 'orbit'; }
+});
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = fpvCamera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix(); fpvCamera.updateProjectionMatrix();
+});
+
+// --- state -----------------------------------------------------------------
+let pose = null, packets = 0, lastRateAt = performance.now(), lastPackets = 0, hz = 0;
+const $ = id => document.getElementById(id);
+
+const motorBars = [];
+MOTORS.forEach(m => {
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `<div class="row" style="font-size:11px"><span>${m.name}</span><span class="val">0</span></div><div class="bar"><i></i></div>`;
+  $('motorbars').appendChild(wrap);
+  motorBars.push({ label: wrap.querySelector('.val'), fill: wrap.querySelector('i') });
+});
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.hostname || '127.0.0.1'}:9101`);
+  ws.onopen = () => { $('link').textContent = 'bridge connected'; $('linkdot').classList.add('on'); };
+  ws.onclose = () => {
+    $('link').textContent = 'bridge lost — retrying';
+    $('linkdot').classList.remove('on');
+    setTimeout(connect, 1200);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = ev => { pose = JSON.parse(ev.data); packets++; };
+}
+connect();
+
+function euler(q) {
+  const e = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+  return { yaw: -e.y * 180 / Math.PI, pitch: e.x * 180 / Math.PI, roll: e.z * 180 / Math.PI };
+}
+
+const tmpV = new THREE.Vector3();
+function render() {
+  requestAnimationFrame(render);
+
+  if (pose) {
+    quad.position.copy(posToThree(pose.pos_ned));
+    quad.quaternion.copy(quatToThree(pose.quat_wxyz));
+
+    const spin = 0.3 + pose.throttle * 3.0;
+    props.forEach((p, i) => { p.rotation.y += spin * (i % 2 ? 1 : -1); });
+
+    if (trailPoints.length === 0 ||
+        quad.position.distanceTo(trailPoints[trailPoints.length - 1]) > 0.05) {
+      trailPoints.push(quad.position.clone());
+      if (trailPoints.length > 600) trailPoints.shift();
+      trail.geometry.setFromPoints(trailPoints);
+    }
+
+    const alt = -pose.pos_ned[2];
+    const speed = Math.hypot(...pose.vel_ned);
+    const a = euler(quad.quaternion);
+    $('alt').textContent = alt.toFixed(2) + ' m';
+    $('spd').textContent = speed.toFixed(2) + ' m/s';
+    $('roll').textContent = a.roll.toFixed(1) + '°';
+    $('pitch').textContent = a.pitch.toFixed(1) + '°';
+    $('yaw').textContent = a.yaw.toFixed(1) + '°';
+    $('vbat').textContent = pose.battery_v.toFixed(2) + ' V';
+    $('thr').textContent = (pose.throttle * 100).toFixed(0) + ' %';
+
+    const armed = pose.armed;
+    $('armdot').className = 'dot' + (armed ? ' armed' : '');
+    $('armtxt').textContent = armed ? 'ARMED' : 'disarmed';
+
+    const maxRpm = Math.max(1, ...pose.rpm);
+    pose.rpm.forEach((r, i) => {
+      motorBars[i].label.textContent = Math.round(r);
+      motorBars[i].fill.style.width = (100 * r / Math.max(maxRpm, 25000)) + '%';
+    });
+  }
+
+  const now = performance.now();
+  if (now - lastRateAt > 500) {
+    hz = (packets - lastPackets) * 1000 / (now - lastRateAt);
+    lastPackets = packets; lastRateAt = now;
+    $('hz').textContent = hz.toFixed(0) + ' Hz';
+  }
+
+  let active = camera;
+  if (mode === 'fpv') {
+    fpvMount.getWorldPosition(fpvCamera.position);
+    fpvMount.getWorldQuaternion(fpvCamera.quaternion);
+    active = fpvCamera;
+  } else if (mode === 'chase') {
+    const back = new THREE.Vector3(0, 0.6, 2.6).applyQuaternion(quad.quaternion);
+    camera.position.lerp(tmpV.copy(quad.position).add(back), 0.12);
+    camera.lookAt(quad.position);
+  } else {
+    camera.position.set(
+      quad.position.x + orbit.dist * Math.cos(orbit.pitch) * Math.sin(orbit.yaw),
+      quad.position.y + orbit.dist * Math.sin(orbit.pitch),
+      quad.position.z + orbit.dist * Math.cos(orbit.pitch) * Math.cos(orbit.yaw));
+    camera.lookAt(quad.position);
+  }
+  renderer.render(scene, active);
+}
+render();
+</script>
+</body>
+</html>

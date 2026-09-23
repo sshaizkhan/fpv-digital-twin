@@ -16,6 +16,7 @@
 // Prints a summary and the real-time ratio; with --out, writes a CSV trace.
 
 #include "fdt/multirotor.hpp"
+#include "fdt/pose_publisher.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -23,12 +24,23 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <thread>
 #include <optional>
 #include <string>
 
 namespace {
 
 std::array<double, 4> uniform(double c) { return {c, c, c, c}; }
+
+/// Mean motor command, as a stand-in for "throttle" in the viewer HUD.
+double throttleOf(const fdt::Multirotor& m) {
+  const auto& rpm = m.telemetry().motor_rpm;
+  const double max_rpm = m.config().motors.model.max_rpm_safety.value;
+  double sum = 0.0;
+  for (double r : rpm) sum += r;
+  return max_rpm > 0.0 ? std::clamp(sum / (4.0 * max_rpm), 0.0, 1.0) : 0.0;
+}
 
 void writeHeader(std::ostream& o) {
   o << "t,x,y,z,alt,vx,vy,vz,qw,qx,qy,qz,p,q,r,"
@@ -61,6 +73,8 @@ int main(int argc, char** argv) {
   // config is loaded -- below, after the argument loop.
   std::optional<double> rate_override;
   uint64_t seed = 0;
+  bool viewer = false;
+  bool realtime = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -75,6 +89,8 @@ int main(int argc, char** argv) {
       else if (a == "--duration") duration = std::stod(next("--duration"));
       else if (a == "--rate") rate_override = std::stod(next("--rate"));
       else if (a == "--seed") seed = std::stoull(next("--seed"));
+      else if (a == "--viewer") { viewer = true; realtime = true; }
+      else if (a == "--no-realtime") realtime = false;
       else if (a == "-h" || a == "--help") {
         std::cout << "usage: fdt_sim [--config PATH] [--profile hover|althold|freefall|takeoff|rollstep]"
                      " [--duration S] [--rate HZ] [--out FILE.csv] [--seed N]\n"
@@ -105,6 +121,18 @@ int main(int argc, char** argv) {
     }
 
     fdt::Multirotor m(cfg, seed);
+
+    // Optional live feed for the browser viewer. With --viewer the loop is
+    // also paced to real time, because a run that finishes 1500x faster than
+    // real time is over before anything can be watched.
+    std::unique_ptr<fdt::PosePublisher> pose;
+    if (viewer) {
+      pose = std::make_unique<fdt::PosePublisher>(
+          cfg.sim.net.viewer_host, static_cast<uint16_t>(cfg.sim.net.viewer_pose_port));
+      std::cout << "viewer: pose -> " << cfg.sim.net.viewer_host << ":"
+                << cfg.sim.net.viewer_pose_port << " at " << cfg.sim.viewer_rate.value
+                << " Hz (real time pacing)\n";
+    }
 
     if (profile == "takeoff") {
       m.placeOnGround();
@@ -158,6 +186,15 @@ int main(int argc, char** argv) {
       }
 
       m.step(dt);
+
+      if (pose) {
+        pose->publishThrottled(m, m.telemetry().total_thrust > 0.0, throttleOf(m), cfg.sim.viewer_rate.value);
+        if (realtime) {
+          const auto target = t0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                       std::chrono::duration<double>(m.time()));
+          std::this_thread::sleep_until(target);
+        }
+      }
       if (out.is_open()) writeRow(out, m);
     }
     const auto t1 = std::chrono::steady_clock::now();

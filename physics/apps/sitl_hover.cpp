@@ -19,6 +19,7 @@
 
 #include "fdt/msp_client.hpp"
 #include "fdt/multirotor.hpp"
+#include "fdt/pose_publisher.hpp"
 #include "fdt/sitl_bridge.hpp"
 
 #include <algorithm>
@@ -27,6 +28,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -84,6 +86,7 @@ int main(int argc, char** argv) {
   double target_alt = 2.0;
   double rate = 1000.0;
   bool acro = false;
+  bool publish_pose = true;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -99,9 +102,11 @@ int main(int argc, char** argv) {
       else if (a == "--target-alt") target_alt = std::stod(next("--target-alt"));
       else if (a == "--rate") rate = std::stod(next("--rate"));
       else if (a == "--acro") acro = true;
+      else if (a == "--no-viewer") publish_pose = false;
       else if (a == "-h" || a == "--help") {
         std::cout << "usage: fdt_sitl_hover [--config PATH] [--host IP] [--duration S]\n"
-                     "                      [--target-alt M] [--rate HZ] [--out CSV] [--acro]\n";
+                     "                      [--target-alt M] [--rate HZ] [--out CSV] [--acro]\n"
+                     "                      [--no-viewer]\n";
         return 0;
       } else {
         std::cerr << "unknown argument: " << a << "\n";
@@ -153,6 +158,17 @@ int main(int argc, char** argv) {
                    "           looks identical under several wrong orderings.\n";
     }
     std::cout << "\n";
+
+    // Pose feed for the viewer. Fire and forget on UDP: if nothing is
+    // listening the sends simply go nowhere, which is the normal case.
+    std::unique_ptr<fdt::PosePublisher> pose;
+    if (publish_pose) {
+      pose = std::make_unique<fdt::PosePublisher>(config.sim.net.viewer_host,
+                                                  static_cast<uint16_t>(config.sim.net.viewer_pose_port));
+      std::cout << "viewer   : pose -> " << config.sim.net.viewer_host << ":"
+                << config.sim.net.viewer_pose_port << " at "
+                << config.sim.viewer_rate.value << " Hz\n";
+    }
 
     quad.placeOnGround();
     const double ground_z = quad.state().position.z();
@@ -309,6 +325,11 @@ int main(int argc, char** argv) {
       quad.setMotorCommands(commands);
       for (int i = 0; i < substeps; ++i) quad.step(dt_phys);
 
+      if (pose) {
+        pose->publishThrottled(quad, fc_armed, throttle_us > 1000.0 ? (throttle_us - 1000.0) / 1000.0 : 0.0,
+                               config.sim.viewer_rate.value);
+      }
+
       const double alt = -(quad.state().position.z() - ground_z);
       const double tilt = tiltDeg(quad.state());
       max_tilt = std::max(max_tilt, tilt);
@@ -342,6 +363,7 @@ int main(int argc, char** argv) {
     std::cout << "worst loop gap : " << std::setprecision(3) << worst_gap_s << " s at t="
               << worst_gap_at << " s" << std::setprecision(2)
               << (worst_gap_s > 1.5 ? "   <- exceeds failsafe_delay!" : "") << "\n";
+    if (pose) std::cout << "pose packets   : " << pose->sent() << "\n";
     std::cout << "motor packets  : " << motor_packets << "\n";
     std::cout << "armed (MSP)    : " << (armed_confirmed ? "yes" : "NO")
               << (armed_confirmed ? "" : "  <- Betaflight never reported ARMED") << "\n";

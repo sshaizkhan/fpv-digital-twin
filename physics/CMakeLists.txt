@@ -14,6 +14,7 @@ add_library(fdt_physics
   src/sitl_link.cpp
   src/msp_client.cpp
   src/sitl_bridge.cpp
+  src/pose_publisher.cpp
 )
 
 target_include_directories(fdt_physics PUBLIC
@@ -57,6 +58,7 @@ if(FDT_BUILD_TESTS)
     tests/test_sitl_packets.cpp
     tests/test_sitl_link.cpp
     tests/test_sitl_bridge.cpp
+    tests/test_pose_publisher.cpp
     tests/test_msp_client.cpp
     tests/test_axis_hit.cpp
   )

@@ -36,3 +36,6 @@ out/
 
 # SITL container state (eeprom.bin lives here)
 .sitl-state/
+
+# Playwright MCP scratch output
+.playwright-mcp/
