@@ -735,25 +735,50 @@ same number is a real cross-check on the motor model.
    t = 5.6 s while dead level. The loader now applies this as a SITL-only
    setting; it is a default on the real quad, so it never appears in `diff all`.
 
-### OPEN: a mid-flight disarm on repeat runs
+### RESOLVED: the mid-flight disarm was Betaflight's FAILSAFE
 
-The hover is **not yet reliable**. It passes from a freshly loaded SITL, but
-running it again against the same container disarms mid-flight:
+Repeat runs disarmed mid-hover. Capturing the flags AT the moment of the
+disarm (rather than afterwards, when they only describe what blocks
+*re-arming*) named it immediately:
 
 ```
-t=14.25  alt 2.44  vz -0.22  thr 1334  m_fl 0.347
-t=14.26  alt 2.44  vz -0.22  thr 1334  m_fl 0.000   <- instantaneous cut
+disarmed (MSP) : at t=16.78 s
+  arming flags AT the disarm : [FAILSAFE RX_FAILSAFE]
+  betaflight rcData AT disarm: [1500, 1500, 1500, 1335, 1000, 1500]
+  worst loop gap : 3.203 s      <- exceeds failsafe_delay (1.5 s)
 ```
 
-Stable hover, steady throttle, level, nothing anomalous leading up to it. The
-final arming flags read `[THROTTLE ARM_SWITCH]`, which is only what prevents
-*re-arming* afterwards, not the cause.
+The RC values Betaflight held were correct and in range, so the data was fine.
+The **timing** was not: the physics loop runs at 1 kHz in userspace, on macOS,
+through Docker, with UDP and occasional blocking MSP calls, and stalls of over
+three seconds were measured. `failsafe_delay` on the real quad is 15 tenths =
+**1.5 s**, so a stall trips RX failsafe and Betaflight drops the quad.
 
-Ruled out: `runaway_takeoff_prevention` (now OFF), tilt/crash (max tilt 0.07
-deg), and throttle (steady). Not yet checked: RX failsafe from RC packet timing
-under the real-time pacing, and whether the previous run leaves state in
-Betaflight that the next one inherits — reloading the config makes the next run
-pass, which points that way.
+**Fix:** `failsafe_delay` is raised to its 200 (20 s) maximum as a SITL-only
+setting. Failsafe models *radio link loss*; here the "link" is a UDP socket on
+loopback and no such failure mode exists. What it was actually catching was
+host scheduling jitter.
 
-**So Phase 2's criterion is demonstrated but not dependable.** Treat a passing
-run as real only when it follows a fresh `load_config_sitl.py`.
+This **masks RC timing problems**, which is a real cost — revisit it in Phase 3
+when a physical radio is in the loop and timing genuinely matters. To keep the
+jitter visible rather than hidden, `fdt_sitl_hover` reports the worst loop gap
+every run and flags one over the failsafe threshold.
+
+Ruled out along the way, each by measurement: `runaway_takeoff_prevention`
+(already off), crash/tilt (max tilt 0.07 deg), throttle timeout (needs
+`FEATURE_MOTOR_STOP` and stick arming; we use a switch with airmode), and stale
+or out-of-range RC (`MSP_RC` showed exactly what we sent).
+
+### Reproducible
+
+Four consecutive runs after the fix, no disarms:
+
+```
+run 1  final 1.99 m  hold error mean 0.33 m  max tilt 0.00 deg  worst gap 0.038 s
+run 2  final 2.00 m  hold error mean 0.33 m  max tilt 0.00 deg  worst gap 0.038 s
+run 3  final 2.00 m  hold error mean 0.33 m  max tilt 0.00 deg  worst gap 0.038 s
+run 4  final 2.00 m  hold error mean 0.33 m  max tilt 0.00 deg  worst gap 0.038 s
+```
+
+**Phase 2 is complete**: SITL builds and runs, the Configurator connects, the
+loop is closed, and the quad arms and holds a stable hover under scripted RC.

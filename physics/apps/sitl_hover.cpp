@@ -189,6 +189,8 @@ int main(int argc, char** argv) {
     // mysterious altitude-hold error.
     bool fc_armed = false;         ///< Betaflight's latest answer
     double disarmed_at = -1.0;
+    uint32_t disarm_arming_flags = 0;
+    std::array<uint16_t, 6> disarm_rc{};
     constexpr double ramp_seconds = 2.0;
     constexpr double kSettleAfterRampS = 5.0;  ///< climb time excluded from the score
     double last_arm_poll = -1.0;
@@ -199,12 +201,25 @@ int main(int argc, char** argv) {
     std::vector<double> hold_errors;
     bool ever_armed = false;
 
+    // Failsafe fires after failsafe_delay (1.5 s on this quad) of RX failure,
+    // so any stall in this loop is a candidate cause for a mid-flight disarm.
+    double worst_gap_s = 0.0;
+    double worst_gap_at = 0.0;
+    auto last_iteration = Clock::now();
+
     const auto start = Clock::now();
     auto next_tick = start;
 
     while (true) {
-      const double t = std::chrono::duration<double>(Clock::now() - start).count();
+      const auto now = Clock::now();
+      const double t = std::chrono::duration<double>(now - start).count();
       if (t >= duration) break;
+      const double gap = std::chrono::duration<double>(now - last_iteration).count();
+      if (gap > worst_gap_s) {
+        worst_gap_s = gap;
+        worst_gap_at = t;
+      }
+      last_iteration = now;
 
       // --- scripted RC ---
       fdt::sitl::RcChannels rc = fdt::sitl::RcChannels::neutral(arm);
@@ -271,6 +286,20 @@ int main(int argc, char** argv) {
           std::cout << "armed at t=" << std::fixed << std::setprecision(2) << t << "s\n";
         } else if (!fc_armed && armed_confirmed) {
           disarmed_at = t;
+          // Capture WHY, at the moment it happened. Read after the fact these
+          // flags only describe what blocks re-arming, not the cause.
+          disarm_arming_flags = msp.armingDisableFlags();
+          // What does Betaflight think the sticks are at this instant? If the
+          // RC has gone stale or out of the rx_min/max_usec window, failsafe
+          // is explained; if it is exactly what we are sending, it is not.
+          try {
+            const auto rc_payload = msp.request(fdt::msp::Command::Rc);
+            for (size_t ch = 0; ch < 6 && (ch * 2 + 1) < rc_payload.size(); ++ch) {
+              disarm_rc[ch] = static_cast<uint16_t>(rc_payload[ch * 2] |
+                                                    (rc_payload[ch * 2 + 1] << 8));
+            }
+          } catch (const fdt::msp::MspError&) {
+          }
           std::cout << "DISARMED by Betaflight at t=" << std::fixed << std::setprecision(2) << t
                     << "s  blocked by [" << describeArmingFlags(msp.armingDisableFlags()) << "]\n";
         }
@@ -310,10 +339,19 @@ int main(int argc, char** argv) {
     }
 
     std::cout << std::fixed << std::setprecision(2);
+    std::cout << "worst loop gap : " << std::setprecision(3) << worst_gap_s << " s at t="
+              << worst_gap_at << " s" << std::setprecision(2)
+              << (worst_gap_s > 1.5 ? "   <- exceeds failsafe_delay!" : "") << "\n";
     std::cout << "motor packets  : " << motor_packets << "\n";
     std::cout << "armed (MSP)    : " << (armed_confirmed ? "yes" : "NO")
               << (armed_confirmed ? "" : "  <- Betaflight never reported ARMED") << "\n";
-    if (disarmed_at >= 0.0) std::cout << "disarmed (MSP) : at t=" << disarmed_at << " s\n";
+    if (disarmed_at >= 0.0) {
+      std::cout << "disarmed (MSP) : at t=" << disarmed_at << " s\n";
+      std::cout << "  arming flags AT the disarm : [" << describeArmingFlags(disarm_arming_flags) << "]\n";
+      std::cout << "  betaflight rcData AT disarm: [";
+      for (size_t ch = 0; ch < 6; ++ch) std::cout << (ch ? ", " : "") << disarm_rc[ch];
+      std::cout << "]  (roll,pitch,yaw,throttle,aux1,aux2)\n";
+    }
     std::cout << "motors ran     : " << (ever_armed ? "yes" : "NO") << "\n";
     std::cout << "peak altitude  : " << peak_alt << " m\n";
     std::cout << "final altitude : " << final_alt << " m  (target " << target_alt << ")\n";

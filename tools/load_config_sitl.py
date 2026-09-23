@@ -91,6 +91,14 @@ BOARD_SPECIFIC_SETTINGS = {
 # win. These are DEFAULTS on the real quad, so they never appear in `diff all`
 # and the replay alone would never touch them.
 SITL_EXTRA = {
+    "failsafe_delay": (
+        "200",
+        "1.5 s on the real quad, raised to the 20 s maximum. Failsafe models RADIO LINK "
+        "LOSS, which does not exist here -- the 'link' is a UDP socket on loopback. What "
+        "it actually catches in the sim is host scheduling jitter: the physics loop runs "
+        "in userspace on macOS through Docker, and stalls of 3.2 s have been measured, "
+        "which tripped RX_FAILSAFE and disarmed the quad mid-hover. NOTE: this masks RC "
+        "timing problems, so revisit it in Phase 3 when a real radio is in the loop."),
     "runaway_takeoff_prevention": (
         "OFF",
         "disarms mid-flight in the sim. It watches for motors spinning up without a "
