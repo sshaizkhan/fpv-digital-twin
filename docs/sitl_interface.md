@@ -427,18 +427,41 @@ version of the probe flooded 30000 packets in under a second and produced
 smeared, half-settled accelerometer readings for exactly this reason. Every
 sweep is now paced in real time.
 
+## 5c. The bridge
+
+`physics/src/sitl_bridge.cpp` holds every conversion at this boundary and
+nothing else does. Derived from the measurements above:
+
+| Quantity | Conversion | Why |
+|---|---|---|
+| Gyro | negate **pitch and yaw** before sending | Cancels SITL's negation (`sitl.c:142-144`) so Betaflight receives our true FRD rates. Sent raw, its rates would disagree in sign with the attitude we also send. |
+| Accelerometer | **unchanged** | SITL's own negation turns our at-rest `[0,0,-g]` into Betaflight's expected +256 on Z. |
+| Attitude | negate the quaternion's **y** component | Roll and yaw arrive correct; only pitch inverts. Betaflight's pitch is nose-up positive (`imu.c:317`), the same sense as ours. |
+| Position, velocity | **unchanged** | Both are NED already (`target.h:260-261`). |
+| Motors | undo SITL's slot permutation, then `betaflight_order` | Two separate mappings, both must be right. |
+| RC | microseconds, AETR then AUX1-4 | `readRCSITL` returns them unscaled (`sitl.c:228-232`). |
+
+Verified end to end by `fdt_sitl_probe`, which drives the real conversions and
+reads back over MSP:
+
+```
+OK   attitude pitch, nose up 30 deg                 30.0  want 30.0
+OK   gyro X, right roll 2 rad/s                   1879.0  want 1879.3
+OK   gyro Y, nose-up pitch 3 rad/s                2818.0  want 2819.0
+OK   acc Z at rest (1 g = 256)                     256.0  want 256.0
+```
+
+The probe exits non-zero if any of those drift, so it is a regression check
+rather than a one-off observation.
+
 ## 5b. Still UNVERIFIED — settle empirically against a running SITL
 
 These cannot be read off cleanly, and guessing them is how the sim ends up
 plausible but wrong. Each gets a test that fails on a sign or index swap.
 
-1. **Gyro axis mapping and signs**, per axis: rotate the model about one body
-   axis, read what Betaflight reports (MSP attitude / Blackbox), confirm sign
-   and magnitude.
-2. **Accelerometer semantics**: specific force or acceleration, and the frame.
-   Park level and confirm Betaflight reads 1 g the right way up; then hover.
-3. **Quaternion convention**: confirm a known attitude round-trips to the
-   Configurator's attitude indicator.
+1. ~~Gyro axis mapping and signs~~ — **DONE**, section 5a.
+2. ~~Accelerometer semantics~~ — **DONE**: specific force, body FRD, section 5a.
+3. ~~Quaternion convention~~ — **DONE**, section 5a.
 4. **Betaflight motor index → physical position** for `mixer QUADX` at 4.5.1,
    which is still unread and is what `motors.betaflight_order` in
    `config/quad.yaml` is flagged `verified: false` for. Combine with the §4.1

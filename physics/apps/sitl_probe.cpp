@@ -19,6 +19,7 @@
 
 #include "fdt/axis_hit.hpp"
 #include "fdt/msp_client.hpp"
+#include "fdt/sitl_bridge.hpp"
 #include "fdt/sitl_link.hpp"
 
 #include <algorithm>
@@ -372,9 +373,69 @@ int main(int argc, char** argv) {
                 << a.roll_deg << std::setw(9) << a.pitch_deg << std::setw(9) << a.yaw_deg << "\n";
     }
 
-    std::cout << "\nNothing above is baked into the code yet. Turn it into a conversion\n"
-                 "plus a test per axis, then mark section 5 of docs/sitl_interface.md.\n";
-    return 0;
+    // --- 6. the bridge, end to end ----------------------------------------
+    // Everything above measures raw packet behaviour. This checks that
+    // fdt::sitl's conversions actually deliver a correct world to Betaflight.
+    std::cout << "\n--- bridge round-trip: does Betaflight see what we mean? ---\n";
+
+    int failures = 0;
+    auto check = [&](const char* what, double got, double want, double tol) {
+      const bool ok = std::abs(got - want) <= tol;
+      std::cout << (ok ? "  OK   " : "  FAIL ") << std::left << std::setw(42) << what << std::right
+                << std::fixed << std::setprecision(1) << std::setw(9) << got << "  want " << want << "\n";
+      if (!ok) ++failures;
+    };
+
+    {
+      // Nose up 30 degrees, pitching further up at 3 rad/s, right roll 2 rad/s.
+      fdt::State s;
+      const double a = 30.0 / kRadToDeg;
+      s.orientation = Eigen::Quaterniond(Eigen::AngleAxisd(a, Eigen::Vector3d::UnitY()));
+      s.angular_velocity = Eigen::Vector3d(2.0, 3.0, 0.0);
+      const Eigen::Vector3d specific_force = fdt::specificForceBody(s, Eigen::Vector3d::Zero());
+
+      const auto until = std::chrono::steady_clock::now() + 600ms;
+      while (std::chrono::steady_clock::now() < until) {
+        clock += 0.001;
+        link.sendState(fdt::sitl::toFdmPacket(s, specific_force, clock));
+        link.sendRc(fdt::sitl::toRcPacket(fdt::sitl::RcChannels::neutral(), clock));
+        std::this_thread::sleep_for(1ms);
+        link.drainMotors();
+      }
+
+      const fdt::msp::Attitude att = msp.attitude();
+      const fdt::msp::RawImu imu = msp.rawImu();
+      const double counts_per_rad = 16.4 * kRadToDeg;
+
+      check("attitude pitch, nose up 30 deg", att.pitch_deg, 30.0, 2.0);
+      check("attitude roll, level", att.roll_deg, 0.0, 2.0);
+      check("gyro X, right roll 2 rad/s", imu.gyro[0], 2.0 * counts_per_rad, 60.0);
+      check("gyro Y, nose-up pitch 3 rad/s", imu.gyro[1], 3.0 * counts_per_rad, 60.0);
+    }
+    {
+      // Level and at rest: a real FC reads +1 g on Z and nothing else.
+      fdt::State s;
+      const Eigen::Vector3d specific_force = fdt::specificForceBody(s, Eigen::Vector3d::Zero());
+      const auto until = std::chrono::steady_clock::now() + 600ms;
+      while (std::chrono::steady_clock::now() < until) {
+        clock += 0.001;
+        link.sendState(fdt::sitl::toFdmPacket(s, specific_force, clock));
+        link.sendRc(fdt::sitl::toRcPacket(fdt::sitl::RcChannels::neutral(), clock));
+        std::this_thread::sleep_for(1ms);
+        link.drainMotors();
+      }
+      const fdt::msp::RawImu imu = msp.rawImu();
+      check("acc Z at rest (1 g = 256)", imu.acc[2], 256.0, 12.0);
+      check("acc X at rest", imu.acc[0], 0.0, 12.0);
+      check("gyro at rest, X", imu.gyro[0], 0.0, 30.0);
+    }
+
+    if (failures == 0) {
+      std::cout << "\nBridge verified: Betaflight sees the world we intend.\n";
+      return 0;
+    }
+    std::cout << "\n" << failures << " bridge check(s) FAILED -- a sign or axis is wrong.\n";
+    return 1;
   } catch (const fdt::msp::MspError& e) {
     std::cerr << "MSP error: " << e.what() << "\n";
     return 1;
