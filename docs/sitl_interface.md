@@ -682,3 +682,78 @@ then start SITL and re-run the loader.
 With the tune loaded, `fdt_sitl_probe` reports **1705 motor packets, 0
 malformed**, and all 15 bridge checks pass with the quad at rest reading
 `[0, 0, 256]`. Phase 2's "physics <-> SITL loop closed" criterion is met.
+
+
+## 8. Phase 2 scripted hover
+
+`fdt_sitl_hover` runs the physics against a live SITL and flies a scripted RC
+sequence. The loop is paced to REAL TIME deliberately: Betaflight free-runs its
+scheduler on the wall clock (section 6), so the physics cannot outrun it.
+Faster-than-real-time replay stays a headless-physics feature for Phase 4.
+
+```sh
+./tools/run_sitl.sh &
+./tools/load_config_sitl.py --restart-container fdt-sitl
+./build/make/physics/fdt_sitl_hover --duration 25 --out /tmp/hover.csv
+```
+
+### It flies
+
+On a freshly loaded SITL, every check passes:
+
+```
+armed (MSP)    : yes          <- flightModeFlags bit 0, Betaflight's own word
+peak altitude  : 2.87 m
+final altitude : 2.00 m  (target 2.00)
+hold error     : mean 0.33 m, worst 0.87 m
+max tilt       : 0.07 deg
+lateral drift  : 0.15 m
+arming flags   : [none]
+```
+
+Two things worth noting. The armed check reads Betaflight's `flightModeFlags`
+rather than inferring arming from motor output — "some motor is non-zero" is
+not evidence of arming. And the hover throttle the closed loop settles at,
+**1332 us / motor command 0.345**, matches what the physics model predicts on
+its own (`Multirotor::hoverCommand()` = 0.346). Two independent routes to the
+same number is a real cross-check on the motor model.
+
+### Three things that had to be got right
+
+1. **Arming is gated on Betaflight confirming it.** Ramping the throttle on a
+   timer raced the arm: the throttle passed `min_check` (1050) while arming was
+   still blocked, setting `ARMING_DISABLED_THROTTLE`, and since the switch was
+   already on, `ARM_SWITCH` latched — it will not arm again until the switch is
+   cycled, exactly as a real quad behaves.
+2. **The throttle ramp targets the model's own hover point.** Ramping past it
+   produced a 1.7 m/s climb and a 1.75 m overshoot the controller then had to
+   undo.
+3. **`runaway_takeoff_prevention` must be OFF in SITL.** It disarms when motors
+   spin up without a matching gyro response — what a real quad with a failed
+   motor looks like, and also what our perfectly rigid, noiseless model looks
+   like. Measured before disabling it: armed, climbed to 0.42 m, disarmed at
+   t = 5.6 s while dead level. The loader now applies this as a SITL-only
+   setting; it is a default on the real quad, so it never appears in `diff all`.
+
+### OPEN: a mid-flight disarm on repeat runs
+
+The hover is **not yet reliable**. It passes from a freshly loaded SITL, but
+running it again against the same container disarms mid-flight:
+
+```
+t=14.25  alt 2.44  vz -0.22  thr 1334  m_fl 0.347
+t=14.26  alt 2.44  vz -0.22  thr 1334  m_fl 0.000   <- instantaneous cut
+```
+
+Stable hover, steady throttle, level, nothing anomalous leading up to it. The
+final arming flags read `[THROTTLE ARM_SWITCH]`, which is only what prevents
+*re-arming* afterwards, not the cause.
+
+Ruled out: `runaway_takeoff_prevention` (now OFF), tilt/crash (max tilt 0.07
+deg), and throttle (steady). Not yet checked: RX failsafe from RC packet timing
+under the real-time pacing, and whether the previous run leaves state in
+Betaflight that the next one inherits — reloading the config makes the next run
+pass, which points that way.
+
+**So Phase 2's criterion is demonstrated but not dependable.** Treat a passing
+run as real only when it follows a fresh `load_config_sitl.py`.

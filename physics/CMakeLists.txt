@@ -38,6 +38,9 @@ target_link_libraries(fdt_sim PRIVATE fdt_physics fdt_warnings)
 add_executable(fdt_sitl_probe apps/sitl_probe.cpp)
 target_link_libraries(fdt_sitl_probe PRIVATE fdt_physics fdt_warnings)
 
+add_executable(fdt_sitl_hover apps/sitl_hover.cpp)
+target_link_libraries(fdt_sitl_hover PRIVATE fdt_physics fdt_warnings)
+
 # --- tests -----------------------------------------------------------------
 
 if(FDT_BUILD_TESTS)

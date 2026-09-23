@@ -107,6 +107,14 @@ class MspClient {
   /// MSP_STATUS arming-disable bitfield (runtime_config.h).
   uint32_t armingDisableFlags();
 
+  /// MSP_STATUS flightModeFlags, the first 32 bits (msp.c:1093).
+  uint32_t flightModeFlags();
+
+  /// BOXARM is box id 0 (rc_modes.h:31), so bit 0 of flightModeFlags. This is
+  /// Betaflight stating it is armed, as opposed to us inferring it from motor
+  /// output.
+  bool isArmed();
+
   /// ARMING_DISABLED_CALIBRATING. `isCalibrating` (fc/core.c:183-195) ORs the
   /// gyro, ACC, BARO and MAG states, but on a freshly booted SITL only the
   /// BARO is ever actually calibrating:

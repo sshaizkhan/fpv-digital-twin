@@ -348,6 +348,16 @@ uint32_t MspClient::armingDisableFlags() {
   return armingDisableFlagsFromStatus(request(Command::Status));
 }
 
+uint32_t MspClient::flightModeFlags() {
+  // msp.c:1086-1093: u16 taskDelta | u16 i2cErrors | u16 sensors | u32 flags
+  const auto p = request(Command::Status);
+  if (p.size() < 10) throw MspError("short MSP_STATUS reply");
+  return static_cast<uint32_t>(p[6]) | (static_cast<uint32_t>(p[7]) << 8) |
+         (static_cast<uint32_t>(p[8]) << 16) | (static_cast<uint32_t>(p[9]) << 24);
+}
+
+bool MspClient::isArmed() { return (flightModeFlags() & 1u) != 0; }
+
 bool MspClient::isCalibrating() {
   return (armingDisableFlags() & kArmingDisabledCalibrating) != 0;
 }

@@ -87,6 +87,18 @@ BOARD_SPECIFIC_SETTINGS = {
     "acc_trim_pitch": "accelerometer trim for the real board",
 }
 
+# Settings SITL needs that the real FC does not, applied AFTER the diff so they
+# win. These are DEFAULTS on the real quad, so they never appear in `diff all`
+# and the replay alone would never touch them.
+SITL_EXTRA = {
+    "runaway_takeoff_prevention": (
+        "OFF",
+        "disarms mid-flight in the sim. It watches for motors spinning up without a "
+        "matching gyro response -- what a real quad with a failed motor looks like, and "
+        "also what our perfectly rigid, noiseless model looks like. Measured: armed, "
+        "climbed to 0.42 m, disarmed at t=5.6 s while dead level."),
+}
+
 
 class Cli:
     """Line-oriented client for SITL's CLI over TCP."""
@@ -282,7 +294,21 @@ def main() -> int:
             detail = next((ln.strip() for ln in reply.splitlines() if ERROR_MARKER in ln), reply.strip())
             rejected.append((sent, detail))
 
-    print(f"applied {len(to_send)} lines, {len(rejected)} rejected by Betaflight")
+    if SITL_EXTRA:
+        print("\nSITL-only settings (defaults on the real quad, so absent from the diff):")
+    for _name, (_value, _why) in SITL_EXTRA.items():
+        _line = f"set {_name} = {_value}"
+        _reply = cli.send(_line)
+        if ERROR_MARKER in _reply:
+            _detail = next((ln.strip() for ln in _reply.splitlines() if ERROR_MARKER in ln), _reply.strip())
+            rejected.append((_line, _detail))
+            print(f"  {_line}   REJECTED")
+        else:
+            to_send.append((_line, "send", _line, ""))
+            print(f"  {_line}")
+        print(f"      {_why}")
+
+    print(f"\napplied {len(to_send)} lines, {len(rejected)} rejected by Betaflight")
     if rejected:
         print("\nREJECTED -- these did not take:")
         for sent, detail in rejected:
