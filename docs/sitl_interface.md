@@ -598,3 +598,68 @@ The Phase 3 acceptance criterion is measured end-to-end input latency. Docker
 Desktop on macOS runs containers inside a VM, and the UDP round trip crosses
 that boundary, so it adds latency that the real FC does not have. Measure and
 report the containerised number, but do not mistake it for the hardware figure.
+
+
+## 7. Loading the real tune into SITL
+
+`tools/load_config_sitl.py` replays `config/diff_all.txt` into a running SITL
+over the same TCP CLI the Configurator's CLI tab uses. Repeatable, versioned,
+and it re-applies itself whenever the container is recreated instead of
+depending on `.sitl-state/eeprom.bin` surviving.
+
+```sh
+./tools/run_sitl.sh &
+./tools/load_config_sitl.py --restart-container fdt-sitl
+./tools/load_config_sitl.py --dry-run      # show the plan, send nothing
+```
+
+It reports every line it changes or drops, because those are exactly the places
+the sim differs from the real quad.
+
+### What cannot be applied, and why
+
+| Line | Action | Reason |
+|---|---|---|
+| `set motor_pwm_protocol = DSHOT300` | → `PWM` | **DSHOT is not compiled into SITL** (`USE_DSHOT` is defined only when `!SITL`, `common_pre.h:52-54`). Left as DSHOT the protocol stays `DISABLED` and **SITL never emits a single motor packet** — this was the last thing blocking the closed loop. |
+| `set acc_calibration = 55,161,8,1` | skipped | The real FC's accelerometer trim. SITL's virtual accel is exact, so applying it *injects* error: a level quad read `[-55, -161, 248]` instead of `[0, 0, 256]`. Caught by the probe, not by inspection. |
+| `set dshot_bidir = ON` | skipped | No DSHOT, so no RPM telemetry. The sim takes rotor speed from its own motor model. |
+| `set dyn_notch_*` | skipped | Dynamic notch filter not compiled into SITL. |
+| `set osd_*` | skipped | No OSD in a SITL build. |
+| `beeper`, `beacon` | skipped | No beeper hardware. |
+| `board_name`, `manufacturer_id`, `mcu_id`, `signature`, `resource` | skipped | Describe a SPEEDYBEEF405V4; SITL has none of those pins, and `board_name` can trigger a config reset mid-replay. |
+
+Everything else applies cleanly: **22 lines, 0 rejected**, and the PID tune
+verifies after the reboot (`p_pitch 47`, `i_pitch 84`, `d_pitch 46`).
+
+### Three behaviours worth knowing before touching SITL's CLI
+
+1. **`save` reboots, and in SITL a reboot exits the process** — which stops the
+   container. So does `exit`. `--restart-container` handles both.
+2. **The diff opens a command batch and never closes it.** `diff all` emits
+   `batch start`; the real FC's `save` ends it implicitly. Inside an open batch
+   the CLI answers every other command with `UNKNOWN COMMAND`, which is
+   baffling to debug — `exit` looks like it does not exist. The loader sends
+   `batch end` explicitly.
+3. **Entering the CLI blocks MSP.** A FC sitting at the `#` prompt answers no
+   MSP at all, so the physics side and the Configurator both find it dead. This
+   bit the loader's own readiness probe, which used `#` to detect a booted FC
+   and thereby left it unusable; it now probes with MSP_FC_VARIANT instead.
+
+### If SITL hangs at boot
+
+A partially-applied config can leave `.sitl-state/eeprom.bin` in a state where
+SITL binds its ports but never finishes starting — it answers neither MSP nor
+the CLI, and the log stops after `bind port 5761 for UART1`. The eeprom is
+disposable:
+
+```sh
+docker rm -f fdt-sitl && rm -f .sitl-state/eeprom.bin
+```
+
+then start SITL and re-run the loader.
+
+### The loop, closed
+
+With the tune loaded, `fdt_sitl_probe` reports **1705 motor packets, 0
+malformed**, and all 15 bridge checks pass with the quad at rest reading
+`[0, 0, 256]`. Phase 2's "physics <-> SITL loop closed" criterion is met.
