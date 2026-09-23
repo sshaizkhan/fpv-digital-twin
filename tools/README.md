@@ -77,7 +77,41 @@ quadratic term against. Doing it properly wants GPS, or a sim-vs-real gyro
 overlay that solves for drag as the residual. Claiming a drag fit from this
 data would be fabricating a measurement.
 
-**The sim-vs-real overlay and stick replay** are the remaining Phase 4 pieces.
+## Replay and overlay
+
+```sh
+.venv/bin/python tools/replay_log.py LOG00042.BFL --plot overlay.png
+.venv/bin/python tools/replay_log.py LOG00042.BFL --start 12 --end 20 --plot punch.png
+```
+
+This feeds the motor outputs the FC **actually produced** into our model and
+compares the resulting gyro against the one the real quad produced.
+
+**Why motor outputs and not sticks.** Replaying sticks needs Betaflight in the
+loop, which means SITL, which is pinned to wall-clock time — a 60 s log costs
+60 s and is not reproducible. Feeding the logged motor outputs removes the
+controller from the comparison entirely, so any disagreement is the physics
+model and there is nowhere else for the error to hide. That is the comparison
+the fitter needs. Measured throughput: **52x real time**.
+
+Closed-loop stick replay, with Betaflight deciding the motor outputs, is a
+different question and belongs with SITL (`fdt_sitl_hover`).
+
+The overlay reports per-axis RMS error, peak error, and correlation — not just
+a picture. A plot that "looks close" is how a model with a 20% thrust error
+gets signed off. Correlation separates the two failure modes: `r≈1` with a
+large RMS means the shape is right and a coefficient is off, while a low `r`
+means something structural is wrong.
+
+### Motor order matters here
+
+Blackbox logs `motor[0..3]` in **Betaflight's** order; the physics wants
+physical motors. The mapping is `motors.betaflight_order`, and it is **still
+unverified**. A wrong mapping produces a plausible overlay with the roll and
+pitch errors swapped, so the CLI warns until someone has spun the real quad's
+motors one at a time. There is a test that deliberately swaps two motors and
+asserts the error becomes visible — without it, the round-trip would prove
+nothing.
 
 ## Note on quad.yaml
 
