@@ -228,6 +228,41 @@ TEST(QuadConfig, DuplicateBetaflightMotorMappingIsAnError) {
   EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
 }
 
+TEST(QuadConfig, ArmSwitchIsLoaded) {
+  const auto cfg = fdt::loadQuadConfig(repoPath("config/quad.yaml"));
+  const auto& arm = cfg.firmware.arm_switch;
+  EXPECT_EQ(arm.aux, 1);
+  EXPECT_EQ(arm.range_start_us, 900);
+  EXPECT_EQ(arm.range_end_us, 1300);
+  EXPECT_TRUE(arm.isArmed(arm.armed_us));
+  EXPECT_FALSE(arm.isArmed(arm.disarmed_us));
+}
+
+TEST(QuadConfig, ArmRangeEndIsExclusiveLikeBetaflight) {
+  // rc_modes.c:93-95: start <= us < end.
+  const auto& arm = fdt::loadQuadConfig(repoPath("config/quad.yaml")).firmware.arm_switch;
+  EXPECT_TRUE(arm.isArmed(900));
+  EXPECT_TRUE(arm.isArmed(1299));
+  EXPECT_FALSE(arm.isArmed(1300));
+  EXPECT_TRUE(arm.isArmed(800)) << "Betaflight clamps the channel to 900 before testing";
+}
+
+TEST(QuadConfig, DisarmedValueInsideTheArmRangeIsAnError) {
+  const auto text = withSubstitution(shippedConfigText(), "disarmed_us: 2000", "disarmed_us: 1000");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, ArmedValueOutsideTheArmRangeIsAnError) {
+  const auto text = withSubstitution(shippedConfigText(), "armed_us: 1000", "armed_us: 1500");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
+TEST(QuadConfig, ArmRangeOffTheTwentyFiveMicrosecondGridIsAnError) {
+  const auto text =
+      withSubstitution(shippedConfigText(), "active_range_us: [900, 1300]", "active_range_us: [900, 1310]");
+  EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);
+}
+
 TEST(QuadConfig, UnknownSchemaVersionIsAnError) {
   const auto text = withSubstitution(shippedConfigText(), "schema_version: 1", "schema_version: 99");
   EXPECT_THROW(fdt::parseQuadConfig(text, "<test>"), fdt::ConfigError);

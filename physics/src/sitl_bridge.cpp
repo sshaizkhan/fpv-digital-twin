@@ -6,14 +6,19 @@ namespace fdt::sitl {
 
 // --- RC ---------------------------------------------------------------------
 
-RcChannels RcChannels::neutral() {
+RcChannels RcChannels::neutral(const ArmSwitch& arm) {
   RcChannels rc;
   rc.us.fill(1000);
   rc.us[kRoll] = 1500;
   rc.us[kPitch] = 1500;
   rc.us[kYaw] = 1500;
   rc.us[kThrottle] = 1000;
+  rc.setArmed(arm, false);
   return rc;
+}
+
+void RcChannels::setArmed(const ArmSwitch& arm, bool armed) {
+  setAux(static_cast<size_t>(arm.aux - 1), armed ? arm.armed_us : arm.disarmed_us);
 }
 
 void RcChannels::setAetr(uint16_t roll, uint16_t pitch, uint16_t throttle, uint16_t yaw) {

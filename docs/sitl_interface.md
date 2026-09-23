@@ -209,6 +209,13 @@ quaternion directly.** Consequences:
 `channelCount = 16` and `rxProvider = RX_PROVIDER_UDP`. Until then Betaflight
 has no receiver at all. **Send RC before expecting to arm.**
 
+**"All AUX low" is NOT disarmed on this quad.** The diff has
+`aux 0 0 0 900 1300 0 0`: ARM on AUX1, active for 900 <= us < 1300
+(`rc_modes.c:87-95`), so the switch arms LOW. `firmware.arm_switch` in
+`config/quad.yaml` mirrors that line, and `RcChannels::neutral(arm)` puts AUX1
+at `disarmed_us`. `SitlBridge.ArmSwitchConfigMatchesTheRealFcDiff` fails if
+the yaml and the diff ever disagree.
+
 ## 5a. MEASURED against a running SITL
 
 `fdt_sitl_probe` streams known values into SITL and reads back what Betaflight

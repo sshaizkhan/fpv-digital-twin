@@ -13,6 +13,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <optional>
+#include <sstream>
 
 namespace {
 
@@ -302,23 +305,76 @@ TEST(SitlBridge, MotorCommandsAreClampedToTheValidRange) {
 // --- RC --------------------------------------------------------------------
 
 TEST(SitlBridge, NeutralRcIsCentredSticksAndLowThrottle) {
-  const auto rc = fdt::sitl::RcChannels::neutral();
+  const auto arm = config().firmware.arm_switch;
+  const auto rc = fdt::sitl::RcChannels::neutral(arm);
   EXPECT_EQ(rc.us[fdt::sitl::RcChannels::kRoll], 1500);
   EXPECT_EQ(rc.us[fdt::sitl::RcChannels::kPitch], 1500);
   EXPECT_EQ(rc.us[fdt::sitl::RcChannels::kYaw], 1500);
   EXPECT_EQ(rc.us[fdt::sitl::RcChannels::kThrottle], 1000) << "neutral must never be armed-and-throttled";
-  for (size_t aux = 0; aux < 4; ++aux) EXPECT_EQ(rc.aux(aux), 1000);
+}
+
+TEST(SitlBridge, NeutralRcHoldsTheArmSwitchOff) {
+  // This quad arms with AUX1 LOW (aux 0 0 0 900 1300), so "every AUX at 1000"
+  // would hold the switch ON. Judge by Betaflight's own range test.
+  const auto arm = config().firmware.arm_switch;
+  const auto rc = fdt::sitl::RcChannels::neutral(arm);
+  const uint16_t us = rc.aux(static_cast<size_t>(arm.aux - 1));
+  EXPECT_FALSE(arm.isArmed(us)) << "neutral AUX" << arm.aux << " = " << us << " us is inside the ARM range ["
+                                << arm.range_start_us << ", " << arm.range_end_us << ")";
+}
+
+TEST(SitlBridge, SetArmedMovesOnlyTheArmChannel) {
+  const auto arm = config().firmware.arm_switch;
+  const auto neutral = fdt::sitl::RcChannels::neutral(arm);
+  auto rc = neutral;
+  rc.setArmed(arm, true);
+  const size_t channel = fdt::sitl::RcChannels::kFirstAux + static_cast<size_t>(arm.aux - 1);
+  EXPECT_TRUE(arm.isArmed(rc.us[channel]));
+  for (size_t i = 0; i < fdt::sitl::kMaxRcChannels; ++i) {
+    if (i != channel) EXPECT_EQ(rc.us[i], neutral.us[i]) << "channel " << i;
+  }
+  rc.setArmed(arm, false);
+  EXPECT_EQ(rc.us, neutral.us);
+}
+
+TEST(SitlBridge, ArmSwitchConfigMatchesTheRealFcDiff) {
+  // quad.yaml mirrors the ARM `aux` line by hand; this is what stops the two
+  // drifting. Format (cli.c:1135, 1162-1169): aux <slot> <box permanentId>
+  // <aux ch> <start us> <end us> ..., with ARM's permanentId 0 and aux ch 0 = AUX1.
+  const auto cfg = config();
+  std::ifstream in(std::string(FDT_REPO_ROOT) + "/" + cfg.firmware.diff_all);
+  ASSERT_TRUE(in) << "cannot open " << cfg.firmware.diff_all;
+
+  std::optional<std::array<int, 3>> found;  // aux ch (1-based), start, end
+  int arm_lines = 0;
+  std::string line;
+  while (std::getline(in, line)) {
+    std::istringstream ss(line);
+    std::string head;
+    int slot = 0, box = 0, channel = 0, start = 0, end = 0;
+    if (!(ss >> head) || head != "aux") continue;
+    if (!(ss >> slot >> box >> channel >> start >> end)) continue;
+    if (box != 0) continue;
+    ++arm_lines;
+    found = std::array<int, 3>{channel + 1, start, end};
+  }
+  ASSERT_EQ(arm_lines, 1) << "expected exactly one ARM (box 0) range in " << cfg.firmware.diff_all;
+
+  const auto& arm = cfg.firmware.arm_switch;
+  EXPECT_EQ(arm.aux, (*found)[0]) << "firmware.arm_switch.aux";
+  EXPECT_EQ(arm.range_start_us, (*found)[1]) << "firmware.arm_switch.active_range_us[0]";
+  EXPECT_EQ(arm.range_end_us, (*found)[2]) << "firmware.arm_switch.active_range_us[1]";
 }
 
 TEST(SitlBridge, AuxOneIsChannelFour) {
-  auto rc = fdt::sitl::RcChannels::neutral();
+  auto rc = fdt::sitl::RcChannels::neutral(config().firmware.arm_switch);
   rc.setAux(0, 1800);
   EXPECT_EQ(rc.us[4], 1800) << "sitl.c:249-251 labels channels 4-7 as AUX1-4";
   EXPECT_EQ(rc.aux(0), 1800);
 }
 
 TEST(SitlBridge, RcPacketCarriesMicrosecondsUnscaled) {
-  auto rc = fdt::sitl::RcChannels::neutral();
+  auto rc = fdt::sitl::RcChannels::neutral(config().firmware.arm_switch);
   rc.setAetr(1600, 1400, 1250, 1500);
   const auto packet = fdt::sitl::toRcPacket(rc, 4.0);
 
@@ -330,7 +386,8 @@ TEST(SitlBridge, RcPacketCarriesMicrosecondsUnscaled) {
 }
 
 TEST(SitlBridge, OutOfRangeAuxIndexIsIgnoredNotUndefined) {
-  auto rc = fdt::sitl::RcChannels::neutral();
-  rc.setAux(99, 2000);  // must not write past the array
-  for (size_t i = 0; i < fdt::sitl::kMaxRcChannels; ++i) EXPECT_LE(rc.us[i], 1500);
+  const auto neutral = fdt::sitl::RcChannels::neutral(config().firmware.arm_switch);
+  auto rc = neutral;
+  rc.setAux(99, 1234);  // must not write past the array
+  EXPECT_EQ(rc.us, neutral.us);
 }

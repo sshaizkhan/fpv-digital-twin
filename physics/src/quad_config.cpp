@@ -245,6 +245,35 @@ struct QuadConfigParser {
     cfg.firmware.target = str(f, "target", "firmware");
     cfg.firmware.diff_all = str(f, "diff_all", "firmware");
     cfg.firmware.dump_all = str(f, "dump_all", "firmware");
+
+    const std::string ap = "firmware.arm_switch";
+    const YAML::Node a = requireMap(f, "arm_switch", "firmware");
+    auto& arm = cfg.firmware.arm_switch;
+    arm.aux = scalarAs<int>(require(a, "aux", ap), join(ap, "aux"));
+    // SITL carries 16 channels, the first four are AETR.
+    if (arm.aux < 1 || arm.aux > 12) bad(join(ap, "aux"), "expected AUX1..AUX12");
+
+    const YAML::Node range = require(a, "active_range_us", ap);
+    if (!range.IsSequence() || range.size() != 2) bad(join(ap, "active_range_us"), "expected [start, end]");
+    arm.range_start_us = scalarAs<int>(range[0], join(ap, "active_range_us"));
+    arm.range_end_us = scalarAs<int>(range[1], join(ap, "active_range_us"));
+    // Betaflight stores ranges as 25 us steps from 900 to 2100 (rc_modes.h:95-102).
+    for (const int us : {arm.range_start_us, arm.range_end_us}) {
+      if (us < 900 || us > 2100 || (us - 900) % 25 != 0) {
+        bad(join(ap, "active_range_us"), "must be 900..2100 in 25 us steps, as Betaflight stores it");
+      }
+    }
+    if (arm.range_start_us >= arm.range_end_us) bad(join(ap, "active_range_us"), "start must be below end");
+
+    const int armed = scalarAs<int>(require(a, "armed_us", ap), join(ap, "armed_us"));
+    const int disarmed = scalarAs<int>(require(a, "disarmed_us", ap), join(ap, "disarmed_us"));
+    for (const auto& [key, us] : {std::pair<const char*, int>{"armed_us", armed}, {"disarmed_us", disarmed}}) {
+      if (us < 750 || us > 2250) bad(join(ap, key), "not a plausible RC pulse width (750..2250 us)");
+    }
+    arm.armed_us = static_cast<uint16_t>(armed);
+    arm.disarmed_us = static_cast<uint16_t>(disarmed);
+    if (!arm.isArmed(armed)) bad(join(ap, "armed_us"), "is outside active_range_us, so it would not arm");
+    if (arm.isArmed(disarmed)) bad(join(ap, "disarmed_us"), "is inside active_range_us, so it would ARM");
   }
 
   void parseMass() {

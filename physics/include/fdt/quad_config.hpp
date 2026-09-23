@@ -10,7 +10,9 @@
 
 #include <Eigen/Core>
 
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -179,12 +181,29 @@ struct Sim {
   Net net;
 };
 
+/// Betaflight's ARM mode range, mirrored from the `aux` line for box 0 in the
+/// real FC's diff. A range is active when start <= us < end (rc_modes.c:87-95).
+struct ArmSwitch {
+  int aux = 1;                   ///< 1-based: AUX1 is RC channel index 4
+  int range_start_us = 0;
+  int range_end_us = 0;
+  uint16_t armed_us = 0;         ///< a value inside the range
+  uint16_t disarmed_us = 0;      ///< a value outside it
+
+  /// Betaflight's test, including its clamp of the channel to [900, 2099].
+  bool isArmed(int us) const {
+    const int v = std::clamp(us, 900, 2099);
+    return v >= range_start_us && v < range_end_us;
+  }
+};
+
 struct Firmware {
   std::optional<std::string> betaflight_version;
   std::optional<std::string> betaflight_git_tag;
   std::string target;
   std::string diff_all;
   std::string dump_all;
+  ArmSwitch arm_switch;
 };
 
 struct Meta {

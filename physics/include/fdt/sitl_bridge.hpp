@@ -35,8 +35,14 @@ inline constexpr double kSeaLevelPressurePa = 101325.0;
 struct RcChannels {
   std::array<uint16_t, kMaxRcChannels> us{};
 
-  /// Sticks centred, throttle low, every AUX low. Note this is NOT armed.
-  static RcChannels neutral();
+  /// Sticks centred, throttle low, the ARM switch at `arm.disarmed_us`, every
+  /// other AUX at 1000. Which AUX value is "not armed" depends on the quad's
+  /// own `aux` config -- this one arms with its switch LOW -- so there is no
+  /// config-free version of this.
+  static RcChannels neutral(const ArmSwitch& arm);
+
+  /// Put the ARM switch in its armed or disarmed position.
+  void setArmed(const ArmSwitch& arm, bool armed);
 
   void setAetr(uint16_t roll, uint16_t pitch, uint16_t throttle, uint16_t yaw);
 

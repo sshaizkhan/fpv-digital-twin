@@ -3,7 +3,7 @@
 //
 // Requires a running SITL:  ./tools/run_sitl.sh
 //
-//   fdt_sitl_probe [--host IP] [--seconds N] [--quiet]
+//   fdt_sitl_probe [--host IP] [--seconds N] [--quiet] [--config quad.yaml]
 //
 // What it does, in order:
 //   1. MSP handshake, so we know which firmware is answering.
@@ -73,14 +73,15 @@ FdmPacket levelState(double t) {
 /// would light up a second axis on every step and trip the multi-axis guard.
 FdmPacket zeroAccelState(double t) { return baseState(t); }
 
-/// Mid-sticks, throttle low, AUX all low.
+/// Mid-sticks, throttle low, ARM switch in its DISARMED position. That
+/// position comes from quad.yaml: this quad arms with AUX1 LOW, so "all AUX
+/// low" would hold the arm switch on.
+///
+/// Set once in main() from --config, before any RC is sent.
+fdt::ArmSwitch g_arm_switch;
+
 RcPacket neutralRc(double t) {
-  RcPacket p{};
-  p.timestamp = t;
-  for (size_t i = 0; i < fdt::sitl::kMaxRcChannels; ++i) p.channels[i] = 1500;
-  p.channels[2] = 1000;  // throttle, AETR order per sitl.c:249
-  for (size_t i = 4; i < fdt::sitl::kMaxRcChannels; ++i) p.channels[i] = 1000;
-  return p;
+  return fdt::sitl::toRcPacket(fdt::sitl::RcChannels::neutral(g_arm_switch), t);
 }
 
 /// Betaflight's tasks run on REAL wall-clock time here -- SIMULATOR_GYROPID_SYNC
@@ -190,6 +191,7 @@ int main(int argc, char** argv) {
   std::string host = "127.0.0.1";
   double seconds = 2.0;
   bool quiet = false;
+  std::string config_path = "config/quad.yaml";
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -208,13 +210,22 @@ int main(int argc, char** argv) {
       }
     } else if (a == "--quiet") {
       quiet = true;
+    } else if (a == "--config" && i + 1 < argc) {
+      config_path = argv[++i];
     } else if (a == "-h" || a == "--help") {
-      std::cout << "usage: fdt_sitl_probe [--host IP] [--seconds N] [--quiet]\n";
+      std::cout << "usage: fdt_sitl_probe [--host IP] [--seconds N] [--quiet] [--config quad.yaml]\n";
       return 0;
     } else {
       std::cerr << "unknown argument: " << a << "\n";
       return 2;
     }
+  }
+
+  try {
+    g_arm_switch = fdt::loadQuadConfig(config_path).firmware.arm_switch;
+  } catch (const fdt::ConfigError& e) {
+    std::cerr << "config: " << e.what() << "\n";
+    return 2;
   }
 
   try {
@@ -394,7 +405,7 @@ int main(int argc, char** argv) {
       while (std::chrono::steady_clock::now() < until) {
         clock += 0.001;
         link.sendState(fdt::sitl::toFdmPacket(s, specific_force, clock));
-        link.sendRc(fdt::sitl::toRcPacket(fdt::sitl::RcChannels::neutral(), clock));
+        link.sendRc(neutralRc(clock));
         std::this_thread::sleep_for(1ms);
         link.drainMotors();
       }

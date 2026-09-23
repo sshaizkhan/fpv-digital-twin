@@ -38,6 +38,17 @@ firmware:
   diff_all: "config/diff_all.txt" # `diff all` from the real FC, saved verbatim
   dump_all: "config/dump_all.txt" # `dump all` from the real FC, saved verbatim
 
+  # The ARM switch, mirrored from `aux 0 0 0 900 1300 0 0` in diff_all.txt
+  # (box 0 = BOXARM, rc_modes.h:31). Betaflight treats a range as active when
+  # start <= us < end (rc_modes.c:87-95), so this quad arms with the switch LOW.
+  # The RC side sends `disarmed_us` whenever it means "not armed"; a test
+  # checks this block against the diff so the two cannot drift apart.
+  arm_switch:
+    aux: 1                          # AUX1 = RC channel index 4
+    active_range_us: [900, 1300]
+    armed_us: 1000                  # inside the range
+    disarmed_us: 2000               # outside it: the switch's other end
+
 # ---------------------------------------------------------------------------
 mass:
   auw:
