@@ -1,0 +1,86 @@
+# ---------------------------------------------------------------------------
+# Jumper T-Pro V2 (EdgeTX) in USB Joystick mode, as SDL2 sees it.
+#
+# Produced by `fdt_radio_probe --wizard` on 2026-09-23 -- MEASURED by moving
+# one control at a time and watching which axis responded, not assumed from
+# EdgeTX's channel order.
+#
+# WHY NOTHING IS INVERTED HERE
+# EdgeTX's joystick axes carry its CHANNEL OUTPUTS -- the same values it sends
+# over the air to the real quad, after its own mixer has applied every reverse
+# and endpoint. The quad flies correctly on this radio, so those values are
+# already right for Betaflight. Our job is only int16 -> microseconds, linearly.
+#
+# Two independent checks that this is correct rather than merely plausible:
+#   * the ARM switch reads -32768 in its ARMED position -> 1000 us, which is
+#     inside this quad's arm band of 900-1300 (aux 0 0 0 900 1300 in the diff)
+#   * the THROTTLE reads -32768 at idle -> 1000 us, below min_check of 1050,
+#     so the quad can arm
+# Both land right with a straight map. An inversion anywhere would break one.
+#
+# A first run with ambiguous prompts ("move the ROLL stick" on a radio with two
+# identical sticks) reported roll on axis 0 and yaw on axis 3 -- exactly
+# swapped. The prompts now name the physical stick.
+# ---------------------------------------------------------------------------
+
+schema_version: 1
+
+device:
+  name: "EdgeTX Jumper TPro V2 Joystick"
+  guid: "0300313009120000544f000000020000"   # SDL joystick GUID, stable per model
+  vendor_id: 0x1209
+  product_id: 0x4f54
+  axes: 8
+  buttons: 24
+  mode: 2                                     # left = throttle/yaw, right = pitch/roll
+
+# RC channel index -> transmitter axis. Channels are in the order SITL hands to
+# Betaflight: 0-3 AETR, then AUX1.. (sitl.c:228-232, 249-251).
+channels:
+  roll:
+    channel: 0
+    axis: 3
+    raw_min: -32768
+    raw_max: 32767
+    inverted: false
+    deadband: 0
+
+  pitch:
+    channel: 1
+    axis: 1
+    raw_min: -32768
+    raw_max: 32767
+    inverted: false
+    deadband: 0
+
+  throttle:
+    channel: 2
+    axis: 2
+    raw_min: -32768
+    raw_max: 32767
+    inverted: false
+    deadband: 0
+
+  yaw:
+    channel: 3
+    axis: 0
+    raw_min: -32768
+    raw_max: 32767
+    inverted: false
+    deadband: 0
+
+  aux1:
+    # ARM. Reads -32768 armed -> 1000 us, inside the 900-1300 band.
+    channel: 4
+    axis: 4
+    raw_min: -32768
+    raw_max: 32767
+    inverted: false
+    deadband: 0
+
+# Axes 5, 6 and 7 were not identified. 5 and 6 showed full travel during the
+# sweep, so they are switches EdgeTX is exporting but nothing is assigned to;
+# 7 never moved at all. AUX2 drives ANGLE mode on this quad
+# (aux 1 1 1 1300 1700), so mapping one of them is the next useful step --
+# until then the sim holds AUX2 wherever the flight app sets it.
+unassigned_axes: [5, 6, 7]

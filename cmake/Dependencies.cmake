@@ -47,6 +47,19 @@ if(NOT TARGET yaml-cpp::yaml-cpp)
   endif()
 endif()
 
+# --- SDL2 (radio input) ----------------------------------------------------
+# Optional: everything except the radio builds and tests without it, so a
+# machine with no SDL2 (or a CI box with no joystick) is not blocked.
+# Homebrew: `brew install sdl2`
+find_package(SDL2 QUIET)
+if(SDL2_FOUND)
+  set(FDT_HAVE_SDL2 TRUE)
+  message(STATUS "SDL2 found: radio input will be built")
+else()
+  set(FDT_HAVE_SDL2 FALSE)
+  message(STATUS "SDL2 NOT found: skipping radio input (brew install sdl2)")
+endif()
+
 # --- GoogleTest (tests only) ----------------------------------------------
 if(FDT_BUILD_TESTS)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)

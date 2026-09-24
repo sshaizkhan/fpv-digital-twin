@@ -45,6 +45,15 @@ target_link_libraries(fdt_sitl_hover PRIVATE fdt_physics fdt_warnings)
 add_executable(fdt_replay apps/replay.cpp)
 target_link_libraries(fdt_replay PRIVATE fdt_physics fdt_warnings)
 
+# --- radio (needs SDL2) ----------------------------------------------------
+if(FDT_HAVE_SDL2)
+  target_sources(fdt_physics PRIVATE src/radio.cpp)
+  target_link_libraries(fdt_physics PRIVATE SDL2::SDL2)
+
+  add_executable(fdt_radio_probe apps/radio_probe.cpp)
+  target_link_libraries(fdt_radio_probe PRIVATE fdt_physics fdt_warnings SDL2::SDL2)
+endif()
+
 # --- tests -----------------------------------------------------------------
 
 if(FDT_BUILD_TESTS)
